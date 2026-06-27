@@ -13,7 +13,7 @@ from decimal import Decimal, InvalidOperation
 import uuid
 
 from database import get_db
-from models import Payment, Account, PaymentConsent
+from models import Payment, Account, PaymentConsent, Client
 from services.auth_service import require_any_token
 from services.payment_service import PaymentService
 
@@ -152,6 +152,7 @@ async def create_payment(
 
     # Проверка согласия для межбанковых запросов
     payment_consent_id_to_store = None
+    payment_consent = None
     if x_requesting_bank:
         # Межбанковый запрос - требуется согласие на платеж
         if not x_payment_consent_id:
@@ -227,6 +228,58 @@ async def create_payment(
     if not debtor_account.get("identification") or not creditor_account.get("identification"):
         raise HTTPException(400, "debtorAccount and creditorAccount identification are required")
 
+    # Платёж по согласию должен соответствовать самому согласию:
+    # счёт списания, счёт получателя и сумма не должны выходить за
+    # рамки авторизованного клиентом. Иначе TPP с согласием на счёт X
+    # и сумму N мог бы списать произвольную сумму с любого счёта.
+    if payment_consent is not None:
+        if payment_consent.debtor_account and \
+                debtor_account.get("identification") != payment_consent.debtor_account:
+            raise HTTPException(403, {
+                "error": "CONSENT_DEBTOR_MISMATCH",
+                "message": "Счёт списания не соответствует согласию"
+            })
+        if payment_consent.creditor_account and \
+                creditor_account.get("identification") != payment_consent.creditor_account:
+            raise HTTPException(403, {
+                "error": "CONSENT_CREDITOR_MISMATCH",
+                "message": "Счёт получателя не соответствует согласию"
+            })
+        if payment_consent.amount is not None and amount > payment_consent.amount:
+            raise HTTPException(403, {
+                "error": "CONSENT_AMOUNT_EXCEEDED",
+                "message": f"Сумма {amount} превышает авторизованную согласием {payment_consent.amount}"
+            })
+
+    # Если платёж идёт НЕ по платёжному согласию (обычный платёж клиента),
+    # счёт списания обязан принадлежать вызывающему. Иначе любой обладатель
+    # валидного токена мог бы списать средства с произвольного счёта, просто
+    # не передавая заголовок x-requesting-bank.
+    if payment_consent is None:
+        caller_id = token_data.get("client_id")
+        if not caller_id:
+            raise HTTPException(
+                403,
+                "Only a client token (or a bank token bound to a client) may initiate a payment"
+            )
+        owner_result = await db.execute(
+            select(Account, Client)
+            .join(Client, Account.client_id == Client.id)
+            .where(Account.account_number == debtor_account.get("identification"))
+        )
+        owner_row = owner_result.first()
+        if not owner_row:
+            raise HTTPException(404, "Debtor account not found")
+        _debtor_acc, _owner = owner_row
+        owner_pid = _owner.person_id or ""
+        # client-токен: person_id совпадает точно (team200-1 == team200-1)
+        # team-токен: команда владеет всеми своими клиентами (team200 -> team200-1)
+        if not (owner_pid == caller_id or owner_pid.startswith(f"{caller_id}-")):
+            raise HTTPException(403, "Debtor account does not belong to the authenticated caller")
+
+    # Явный код банка получателя (для прямого межбанковского роутинга)
+    target_bank_hint = creditor_account.get("bank_code") or creditor_account.get("bankCode")
+
     try:
         # Инициировать платеж
         payment, interbank = await PaymentService.initiate_payment(
@@ -235,7 +288,8 @@ async def create_payment(
             to_account_number=creditor_account.get("identification"),
             amount=amount,
             description=description,
-            payment_consent_id=payment_consent_id_to_store
+            payment_consent_id=payment_consent_id_to_store,
+            target_bank_hint=target_bank_hint
         )
         
         # Если использовалось согласие - пометить его как использованное

@@ -38,8 +38,8 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None, u
     # Для bank tokens используем RS256
     if use_rs256:
         try:
-            # Загрузить приватный ключ
-            keys_path = Path(__file__).parent.parent.parent.parent / "shared" / "keys"
+            # Загрузить приватный ключ (shared/keys лежит в корне репозитория)
+            keys_path = Path(__file__).parent.parent / "shared" / "keys"
             private_key_path = keys_path / f"{config.BANK_CODE}_private.pem"
             
             if not private_key_path.exists():
@@ -103,7 +103,7 @@ async def verify_rs256_token(token: str, bank_code: str) -> dict:
     """Проверка RS256 токена через JWKS"""
     try:
         # Попробовать загрузить JWKS из локального файла
-        keys_path = Path(__file__).parent.parent.parent.parent / "shared" / "keys"
+        keys_path = Path(__file__).parent.parent / "shared" / "keys"
         public_key_path = keys_path / f"{bank_code}_public.pem"
         
         if public_key_path.exists():

@@ -1,0 +1,140 @@
+# Федерация из 3 банков (vbank / abank / sbank) для локального запуска.
+#
+# Запуск:   docker compose -f docker-compose.banks.yml up --build
+# Внешний доступ:
+#   - VBank: http://localhost:8001  (Swagger: /docs)
+#   - ABank: http://localhost:8002
+#   - SBank: http://localhost:8003
+#
+# Каждый банк:
+#   - имеет собственную БД (vbank-db / abank-db / sbank-db);
+#   - сам сидит демо-данные при первом старте (см. seed.py);
+#   - ходит к соседям по имени сервиса (http://vbank:8000 и т.д.),
+#     поэтому межбанковские переводы работают «из коробки».
+#
+# Для доступа ИЗВНЕ (с другого хоста) меняй проброшенные порты и при
+# необходимости задавай INTERBANK_BANK_URLS с публичными адресами.
+
+name: bank-federation
+
+x-bank-env: &bank-env
+  SECRET_KEY: federation-shared-secret-change-me
+  ALGORITHM: HS256
+  ACCESS_TOKEN_EXPIRE_MINUTES: "1440"
+  API_VERSION: "2.1"
+  # Список банков федерации и шаблон адреса (имена сервисов == коды банков)
+  KNOWN_BANKS: vbank,abank,sbank
+  INTERBANK_URL_TEMPLATE: http://{code}:8000
+  INTERBANK_TIMEOUT: "10"
+  # Общий секрет для аутентификации входящих межбанковских переводов
+  INTERBANK_SHARED_SECRET: interbank-secret-change-me
+  # Креды команды для POST /auth/bank-token (одинаковые во всех банках)
+  TEAM_CLIENT_ID: team200
+  TEAM_CLIENT_SECRET: 5OAaa4DYzYKfnOU6zbR34ic5qMm7VSMB
+
+x-db-env: &db-env
+  POSTGRES_USER: bankuser
+  POSTGRES_PASSWORD: bankpass
+
+x-bank-service: &bank-service
+  build:
+    context: .
+    dockerfile: Dockerfile
+  command: python -m uvicorn main:app --host 0.0.0.0 --port 8000
+  volumes:
+    - ./shared/keys:/app/shared/keys:ro
+    - ./frontend:/app/frontend:ro
+  restart: unless-stopped
+
+services:
+  # ===== VBANK =====
+  vbank-db:
+    image: postgres:15-alpine
+    environment:
+      <<: *db-env
+      POSTGRES_DB: vbank_db
+    volumes:
+      - vbank_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bankuser"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  vbank:
+    <<: *bank-service
+    container_name: vbank
+    environment:
+      <<: *bank-env
+      BANK_CODE: vbank
+      BANK_NAME: Virtual Bank
+      DATABASE_URL: postgresql://bankuser:bankpass@vbank-db:5432/vbank_db
+      PUBLIC_URL: http://localhost:8001
+    ports:
+      - "8001:8000"
+    depends_on:
+      vbank-db:
+        condition: service_healthy
+
+  # ===== ABANK =====
+  abank-db:
+    image: postgres:15-alpine
+    environment:
+      <<: *db-env
+      POSTGRES_DB: abank_db
+    volumes:
+      - abank_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bankuser"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  abank:
+    <<: *bank-service
+    container_name: abank
+    environment:
+      <<: *bank-env
+      BANK_CODE: abank
+      BANK_NAME: Awesome Bank
+      DATABASE_URL: postgresql://bankuser:bankpass@abank-db:5432/abank_db
+      PUBLIC_URL: http://localhost:8002
+    ports:
+      - "8002:8000"
+    depends_on:
+      abank-db:
+        condition: service_healthy
+
+  # ===== SBANK =====
+  sbank-db:
+    image: postgres:15-alpine
+    environment:
+      <<: *db-env
+      POSTGRES_DB: sbank_db
+    volumes:
+      - sbank_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bankuser"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  sbank:
+    <<: *bank-service
+    container_name: sbank
+    environment:
+      <<: *bank-env
+      BANK_CODE: sbank
+      BANK_NAME: Super Bank
+      DATABASE_URL: postgresql://bankuser:bankpass@sbank-db:5432/sbank_db
+      PUBLIC_URL: http://localhost:8003
+    ports:
+      - "8003:8000"
+    depends_on:
+      sbank-db:
+        condition: service_healthy
+
+volumes:
+  vbank_data:
+  abank_data:
+  sbank_data:

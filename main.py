@@ -12,8 +12,9 @@ from pathlib import Path
 try:
     # Попытка относительного импорта (для пакетного режима)
     from .config import config
-    from .database import engine
+    from .database import engine, AsyncSessionLocal
     from .models import Base
+    from .seed import seed_if_empty
     from .middleware import APILoggingMiddleware
     from .api import (
         accounts, auth, consents, payments, admin, products, well_known,
@@ -24,8 +25,9 @@ try:
 except ImportError:
     # Абсолютный импорт (для прямого запуска)
     from config import config
-    from database import engine
+    from database import engine, AsyncSessionLocal
     from models import Base
+    from seed import seed_if_empty
     from middleware import APILoggingMiddleware
     from api import (
         accounts, auth, consents, payments, admin, products, well_known, 
@@ -45,7 +47,16 @@ async def lifespan(app: FastAPI):
     # Create tables (в production использовать Alembic)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    
+
+    # Засидить демо-данные, если БД пуста (идемпотентно)
+    try:
+        async with AsyncSessionLocal() as session:
+            seeded = await seed_if_empty(session)
+            if seeded:
+                print(f"🌱 Seeded demo data for {config.BANK_CODE}")
+    except Exception as e:
+        print(f"⚠️  Seeding skipped/failed: {e}")
+
     yield
     
     # Shutdown
