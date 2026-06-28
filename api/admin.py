@@ -12,8 +12,16 @@ from datetime import datetime
 
 from database import get_db
 from models import BankCapital, InterbankTransfer, Payment, Account, BankSettings, KeyRateHistory, Team, ConsentRequest, Client, Consent
+from services.auth_service import require_banker
 
-router = APIRouter(prefix="/admin", tags=["Internal: Admin"], include_in_schema=False)
+# Весь /admin требует banker-токен (POST /auth/banker-login).
+# Раньше эндпоинты были открыты — GET /admin/teams отдавал client_secret всех команд.
+router = APIRouter(
+    prefix="/admin",
+    tags=["Internal: Admin"],
+    include_in_schema=False,
+    dependencies=[Depends(require_banker)],
+)
 
 
 @router.get("/capital")
@@ -97,8 +105,8 @@ async def get_all_payments(
         "payments": [
             {
                 "payment_id": p.payment_id,
-                "sender_account_id": p.debtor_account or "—",
-                "receiver_account_id": p.destination_account or p.creditor_account or "—",
+                "sender_account_id": f"acc-{p.account_id}" if p.account_id else "—",
+                "receiver_account_id": p.destination_account or "—",
                 "amount": float(p.amount),
                 "currency": p.currency or "RUB",
                 "destination_account": p.destination_account,
@@ -379,20 +387,17 @@ async def delete_team(client_id: str, db: AsyncSession = Depends(get_db)):
     
     if not team:
         raise HTTPException(404, "Team not found")
-    
-    # Delete team's test clients
-    await db.execute(
-        select(Client).where(Client.person_id.like(f"{client_id}-%"))
-    )
-    # Note: Cascade delete should handle this, but we can be explicit
-    
-    # Delete team
+
+    # Удаляем только учётные данные команды. Тестовых клиентов НЕ трогаем:
+    # у них есть счета/карты/транзакции (внешние ключи), каскадное удаление
+    # упало бы по FK и стёрло бы финансовые данные. При необходимости команду
+    # лучше деактивировать (PUT /admin/teams/{id}/suspend).
     await db.delete(team)
     await db.commit()
-    
+
     return {
         "success": True,
-        "message": f"Команда {client_id} удалена"
+        "message": f"Команда {client_id} удалена (клиенты сохранены)"
     }
 
 

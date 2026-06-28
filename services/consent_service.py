@@ -19,16 +19,19 @@ class ConsentService:
         db: AsyncSession,
         client_person_id: str,
         requesting_bank: str,
-        permissions: List[str]
+        permissions: List[str],
+        consent_id: Optional[str] = None
     ) -> Optional[Consent]:
         """
         Проверка наличия активного согласия
-        
+
         Args:
             client_person_id: ID клиента (person_id)
             requesting_bank: Код банка, запрашивающего доступ
             permissions: Требуемые permissions
-        
+            consent_id: (опционально) конкретный consent_id из заголовка X-Consent-Id.
+                Если передан — проверяется именно это согласие, а не любое активное.
+
         Returns:
             Consent если найдено и активно, иначе None
         """
@@ -37,23 +40,30 @@ class ConsentService:
             select(Client).where(Client.person_id == client_person_id)
         )
         client = client_result.scalar_one_or_none()
-        
+
         if not client:
             return None
-        
+
         # Найти активное согласие
+        conditions = [
+            Consent.client_id == client.id,
+            Consent.granted_to == requesting_bank,
+            Consent.status == "active",
+            Consent.expiration_date_time > datetime.utcnow()
+        ]
+        # Если указан конкретный consent_id — проверяем именно его
+        if consent_id:
+            conditions.append(Consent.consent_id == consent_id)
+
         result = await db.execute(
-            select(Consent).where(
-                and_(
-                    Consent.client_id == client.id,
-                    Consent.granted_to == requesting_bank,
-                    Consent.status == "active",
-                    Consent.expiration_date_time > datetime.utcnow()
-                )
-            )
+            select(Consent)
+            .where(and_(*conditions))
+            .order_by(Consent.creation_date_time.desc())
         )
-        consent = result.scalar_one_or_none()
-        
+        # .first() вместо scalar_one_or_none(): у клиента может быть несколько
+        # активных согласий для одного банка — это не должно приводить к ошибке
+        consent = result.scalars().first()
+
         if not consent:
             return None
         

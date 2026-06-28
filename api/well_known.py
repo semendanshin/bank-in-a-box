@@ -22,8 +22,8 @@ async def get_jwks():
     """
     from config import config
     
-    # Путь к JWKS файлу банка
-    jwks_path = Path(__file__).parent.parent.parent.parent / "shared" / "keys" / f"{config.BANK_CODE}_jwks.json"
+    # Путь к JWKS файлу банка (shared/keys лежит в корне репозитория)
+    jwks_path = Path(__file__).parent.parent / "shared" / "keys" / f"{config.BANK_CODE}_jwks.json"
     
     # Базовый JWKS если файла нет
     default_jwks = {

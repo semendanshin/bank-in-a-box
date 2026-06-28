@@ -13,6 +13,7 @@ import uuid
 from database import get_db
 from models import ProductAgreement, Product, Client, Account, BankCapital, Transaction
 from services.auth_service import require_any_token
+from utils import parse_account_id
 
 router = APIRouter(prefix="/product-agreements", tags=["7 Договоры с продуктами"])
 
@@ -50,7 +51,7 @@ async def get_agreements(
     """
     # Найти клиента
     result = await db.execute(
-        select(Client).where(Client.person_id == current_client["client_id"])
+        select(Client).where(Client.person_id == token_data.get("client_id"))
     )
     client = result.scalar_one_or_none()
     
@@ -114,7 +115,7 @@ async def create_agreement(
     """
     # Найти клиента
     result = await db.execute(
-        select(Client).where(Client.person_id == current_client["client_id"])
+        select(Client).where(Client.person_id == token_data.get("client_id"))
     )
     client = result.scalar_one_or_none()
     
@@ -164,7 +165,7 @@ async def create_agreement(
         
         # Списать средства со source account
         if True:  # Always true now
-            source_acc_id = int(request.source_account_id.replace("acc-", ""))
+            source_acc_id = parse_account_id(request.source_account_id)
             source_acc_result = await db.execute(
                 select(Account).where(Account.id == source_acc_id, Account.client_id == client.id)
             )
@@ -312,7 +313,7 @@ async def get_agreement(
     """
     # Найти клиента
     result = await db.execute(
-        select(Client).where(Client.person_id == current_client["client_id"])
+        select(Client).where(Client.person_id == token_data.get("client_id"))
     )
     client = result.scalar_one_or_none()
     
@@ -387,7 +388,7 @@ async def close_agreement(
     """
     # Найти клиента
     result = await db.execute(
-        select(Client).where(Client.person_id == current_client["client_id"])
+        select(Client).where(Client.person_id == token_data.get("client_id"))
     )
     client = result.scalar_one_or_none()
     
@@ -428,7 +429,7 @@ async def close_agreement(
             raise HTTPException(400, f"Loan has debt of {loan_account.balance}. Repayment required. Provide repayment_account_id.")
         
         # Получить счет для погашения
-        repay_acc_id = int(request.repayment_account_id.replace("acc-", ""))
+        repay_acc_id = parse_account_id(request.repayment_account_id)
         repay_result = await db.execute(
             select(Account).where(Account.id == repay_acc_id, Account.client_id == client.id)
         )
@@ -476,7 +477,51 @@ async def close_agreement(
         if capital:
             capital.capital += debt
             capital.total_loans -= debt
-    
+
+    elif product.product_type == "deposit" and loan_account and loan_account.balance > 0:
+        # Закрытие вклада: вернуть остаток клиенту, иначе деньги пропадут.
+        deposit_balance = loan_account.balance
+        dest_account = None
+        if request and request.repayment_account_id:
+            dest_acc_id = parse_account_id(request.repayment_account_id)
+            dest_account = (await db.execute(
+                select(Account).where(Account.id == dest_acc_id, Account.client_id == client.id)
+            )).scalar_one_or_none()
+            if not dest_account:
+                raise HTTPException(404, "Payout account not found")
+        else:
+            # По умолчанию — первый активный checking-счёт клиента (не сам депозит)
+            dest_account = (await db.execute(
+                select(Account).where(
+                    Account.client_id == client.id,
+                    Account.account_type == "checking",
+                    Account.status == "active",
+                    Account.id != loan_account.id,
+                ).limit(1)
+            )).scalars().first()
+            if not dest_account:
+                raise HTTPException(
+                    400,
+                    "No account to return deposit funds. Provide repayment_account_id.",
+                )
+
+        dest_account.balance += deposit_balance
+        loan_account.balance = Decimal("0")
+        db.add(Transaction(
+            account_id=loan_account.id,
+            transaction_id=f"tx-{uuid.uuid4().hex[:12]}",
+            amount=deposit_balance, direction="debit",
+            counterparty="Закрытие депозита",
+            description=f"Возврат вклада на счёт {dest_account.account_number}",
+        ))
+        db.add(Transaction(
+            account_id=dest_account.id,
+            transaction_id=f"tx-{uuid.uuid4().hex[:12]}",
+            amount=deposit_balance, direction="credit",
+            counterparty="Возврат вклада",
+            description=f"Возврат вклада со счёта {loan_account.account_number}",
+        ))
+
     # Закрыть договор
     agreement.status = "closed"
     

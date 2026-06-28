@@ -9,12 +9,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_
 from typing import Optional
 from datetime import datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 import uuid
 
 from database import get_db
-from models import Payment, Account, PaymentConsent
-from services.auth_service import require_any_token
+from models import Payment, Account, PaymentConsent, Client
+from services.auth_service import require_any_token, caller_owns_client
 from services.payment_service import PaymentService
 
 
@@ -147,11 +147,12 @@ async def create_payment(
     - Комиссия не взимается
     - Все валюты конвертируются по курсу 1:1 для упрощения
     """
-    if not current_client:
+    if not token_data:
         raise HTTPException(401, "Unauthorized")
-    
+
     # Проверка согласия для межбанковых запросов
     payment_consent_id_to_store = None
+    payment_consent = None
     if x_requesting_bank:
         # Межбанковый запрос - требуется согласие на платеж
         if not x_payment_consent_id:
@@ -215,15 +216,71 @@ async def create_payment(
         remittance = initiation.get("remittanceInformation", {})
         description = remittance.get("unstructured", "") if remittance else ""
     
+    # Валидация суммы платежа
+    try:
+        amount = Decimal(str(amount_data.get("amount", "0")))
+    except (InvalidOperation, TypeError):
+        raise HTTPException(400, "Invalid amount format")
+
+    if amount <= 0:
+        raise HTTPException(400, "Amount must be positive")
+
+    if not debtor_account.get("identification") or not creditor_account.get("identification"):
+        raise HTTPException(400, "debtorAccount and creditorAccount identification are required")
+
+    # Платёж по согласию должен соответствовать самому согласию:
+    # счёт списания, счёт получателя и сумма не должны выходить за
+    # рамки авторизованного клиентом. Иначе TPP с согласием на счёт X
+    # и сумму N мог бы списать произвольную сумму с любого счёта.
+    if payment_consent is not None:
+        if payment_consent.debtor_account and \
+                debtor_account.get("identification") != payment_consent.debtor_account:
+            raise HTTPException(403, {
+                "error": "CONSENT_DEBTOR_MISMATCH",
+                "message": "Счёт списания не соответствует согласию"
+            })
+        if payment_consent.creditor_account and \
+                creditor_account.get("identification") != payment_consent.creditor_account:
+            raise HTTPException(403, {
+                "error": "CONSENT_CREDITOR_MISMATCH",
+                "message": "Счёт получателя не соответствует согласию"
+            })
+        if payment_consent.amount is not None and amount > payment_consent.amount:
+            raise HTTPException(403, {
+                "error": "CONSENT_AMOUNT_EXCEEDED",
+                "message": f"Сумма {amount} превышает авторизованную согласием {payment_consent.amount}"
+            })
+
+    # Если платёж идёт НЕ по платёжному согласию (обычный платёж клиента),
+    # счёт списания обязан принадлежать вызывающему. Иначе любой обладатель
+    # валидного токена мог бы списать средства с произвольного счёта, просто
+    # не передавая заголовок x-requesting-bank.
+    if payment_consent is None:
+        owner_result = await db.execute(
+            select(Account, Client)
+            .join(Client, Account.client_id == Client.id)
+            .where(Account.account_number == debtor_account.get("identification"))
+        )
+        owner_row = owner_result.first()
+        if not owner_row:
+            raise HTTPException(404, "Debtor account not found")
+        _debtor_acc, _owner = owner_row
+        if not caller_owns_client(token_data, _owner.person_id):
+            raise HTTPException(403, "Debtor account does not belong to the authenticated caller")
+
+    # Явный код банка получателя (для прямого межбанковского роутинга)
+    target_bank_hint = creditor_account.get("bank_code") or creditor_account.get("bankCode")
+
     try:
         # Инициировать платеж
         payment, interbank = await PaymentService.initiate_payment(
             db=db,
             from_account_number=debtor_account.get("identification"),
             to_account_number=creditor_account.get("identification"),
-            amount=Decimal(amount_data.get("amount", "0")),
+            amount=amount,
             description=description,
-            payment_consent_id=payment_consent_id_to_store
+            payment_consent_id=payment_consent_id_to_store,
+            target_bank_hint=target_bank_hint
         )
         
         # Если использовалось согласие - пометить его как использованное
@@ -276,16 +333,22 @@ async def get_payment(
     OpenBanking Russia Payments API
     GET /payments/{paymentId}
     """
-    if not current_client:
+    if not token_data:
         raise HTTPException(401, "Unauthorized")
-    
+
     payment = await PaymentService.get_payment(db, payment_id)
-    
+
     if not payment:
         raise HTTPException(404, "Payment not found")
-    
-    # TODO: Проверить что клиент имеет право просматривать этот платеж
-    
+
+    # Платёж может смотреть только владелец счёта списания
+    owner = (await db.execute(
+        select(Client).join(Account, Account.client_id == Client.id)
+        .where(Account.id == payment.account_id)
+    )).scalar_one_or_none()
+    if not owner or not caller_owns_client(token_data, owner.person_id):
+        raise HTTPException(403, "Access denied")
+
     payment_data = PaymentData(
         paymentId=payment.payment_id,
         status=payment.status,

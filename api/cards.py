@@ -4,17 +4,17 @@ Cards API - Управление банковскими картами
 from fastapi import APIRouter, Depends, HTTPException, Query, Header
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_
+from sqlalchemy import select, and_, func
 from typing import Optional, List
 from datetime import datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 import uuid
 import random
 
-from ..database import get_db
-from ..models import Card, Account, Client
-from ..services.auth_service import require_any_token, require_client
-from ..services.consent_service import ConsentService
+from database import get_db
+from models import Card, Account, Client, Transaction, Merchant
+from services.auth_service import require_any_token, require_client, caller_owns_client
+from services.consent_service import ConsentService
 
 
 router = APIRouter(prefix="/cards", tags=["8 Карты"])
@@ -58,28 +58,41 @@ class CardLimitsRequest(BaseModel):
     monthly_limit: Optional[float] = Field(None, description="Месячный лимит")
 
 
+class CardPaymentRequest(BaseModel):
+    """Оплата картой (списание со счёта карты)"""
+    amount: float = Field(..., gt=0, description="Сумма операции")
+    merchant_name: Optional[str] = Field(None, description="Название мерчанта")
+    mcc: Optional[str] = Field(None, description="MCC-код")
+    city: Optional[str] = Field(None, description="Город операции")
+    description: Optional[str] = Field(None, description="Описание")
+
+
 # === Helper Functions ===
 
+def _luhn_check_digit(number_without_check: str) -> str:
+    """Контрольная цифра по настоящему алгоритму Луна."""
+    total = 0
+    for i, ch in enumerate(reversed(number_without_check)):
+        d = int(ch)
+        if i % 2 == 0:  # удваиваем каждую вторую цифру (с конца)
+            d *= 2
+            if d > 9:
+                d -= 9
+        total += d
+    return str((10 - total % 10) % 10)
+
+
 def generate_card_number(bank_code: str) -> str:
-    """Генерация номера карты (16 цифр) по алгоритму Луна"""
-    # BIN коды для разных банков
+    """Генерация валидного по Луну номера карты (16 цифр) для банка."""
     bins = {
         'vbank': '427610',
         'abank': '427620',
-        'sbank': '427630'
+        'sbank': '427630',
     }
-    
-    from ..config import config
-    bin_code = bins.get(config.BANK_CODE, '427600')
-    
-    # 9 случайных цифр
-    account_number = ''.join([str(random.randint(0, 9)) for _ in range(9)])
-    
-    # Контрольная цифра по алгоритму Луна (упрощенная версия)
-    card_without_check = bin_code + account_number
-    check_digit = str((10 - sum(int(d) for d in card_without_check) % 10) % 10)
-    
-    return card_without_check + check_digit
+    bin_code = bins.get(bank_code, '427600')
+    body = ''.join(str(random.randint(0, 9)) for _ in range(9))
+    base = bin_code + body  # 15 цифр
+    return base + _luhn_check_digit(base)
 
 
 def mask_card_number(card_number: str) -> str:
@@ -141,10 +154,12 @@ async def get_cards(
         # Локальный запрос
         if token_data.get("type") == "client":
             target_client_id = token_data.get("client_id")
-        elif client_id:
+        elif client_id and caller_owns_client(token_data, client_id):
+            # team/bank-токен может работать только со СВОИМИ клиентами;
+            # для чужих нужен межбанковский путь (x-requesting-bank + consent)
             target_client_id = client_id
         else:
-            raise HTTPException(401, "Unauthorized")
+            raise HTTPException(403, "Access denied")
     
     # Найти клиента
     result = await db.execute(
@@ -239,10 +254,12 @@ async def get_card_details(
         # Локальный запрос
         if token_data.get("type") == "client":
             target_client_id = token_data.get("client_id")
-        elif client_id:
+        elif client_id and caller_owns_client(token_data, client_id):
+            # team/bank-токен может работать только со СВОИМИ клиентами;
+            # для чужих нужен межбанковский путь (x-requesting-bank + consent)
             target_client_id = client_id
         else:
-            raise HTTPException(401, "Unauthorized")
+            raise HTTPException(403, "Access denied")
     
     # Найти клиента
     result = await db.execute(
@@ -272,7 +289,7 @@ async def get_card_details(
         "data": CardResponse(
             cardId=card.card_id,
             cardNumber=mask_card_number(card.card_number),
-            cardNumberFull=card.card_number if show_full_number else None,
+            cardNumberFull=card.card_number if (show_full_number and token_data.get("type") == "client") else None,
             cardType=card.card_type,
             cardName=card.card_name,
             holderName=card.holder_name,
@@ -335,10 +352,12 @@ async def create_card(
         # Локальный запрос
         if token_data.get("type") == "client":
             target_client_id = token_data.get("client_id")
-        elif client_id:
+        elif client_id and caller_owns_client(token_data, client_id):
+            # team/bank-токен может работать только со СВОИМИ клиентами;
+            # для чужих нужен межбанковский путь (x-requesting-bank + consent)
             target_client_id = client_id
         else:
-            raise HTTPException(401, "Unauthorized")
+            raise HTTPException(403, "Access denied")
     
     # Найти клиента
     result = await db.execute(
@@ -354,20 +373,21 @@ async def create_card(
         select(Account).where(
             Account.account_number == request.account_number,
             Account.client_id == client.id,
-            Account.account_type.in_(['checking', 'savings'])
+            Account.account_type.in_(['checking', 'savings']),
+            Account.status == "active"
         )
     )
     account = account_result.scalar_one_or_none()
-    
+
     if not account:
-        raise HTTPException(404, "Account not found or invalid type. Only checking/savings accounts can have cards.")
+        raise HTTPException(404, "Active checking/savings account not found. Cards require an active account.")
     
     # Валидация типа карты
     if request.card_type not in ['debit', 'credit']:
         raise HTTPException(400, "Invalid card_type. Must be 'debit' or 'credit'")
     
     # Генерировать номер карты
-    from ..config import config
+    from config import config
     card_number = generate_card_number(config.BANK_CODE)
     
     # Проверить уникальность
@@ -491,10 +511,12 @@ async def update_card_status(
         # Локальный запрос
         if token_data.get("type") == "client":
             target_client_id = token_data.get("client_id")
-        elif client_id:
+        elif client_id and caller_owns_client(token_data, client_id):
+            # team/bank-токен может работать только со СВОИМИ клиентами;
+            # для чужих нужен межбанковский путь (x-requesting-bank + consent)
             target_client_id = client_id
         else:
-            raise HTTPException(401, "Unauthorized")
+            raise HTTPException(403, "Access denied")
     
     # Найти клиента
     result = await db.execute(
@@ -585,10 +607,12 @@ async def update_card_limits(
         # Локальный запрос
         if token_data.get("type") == "client":
             target_client_id = token_data.get("client_id")
-        elif client_id:
+        elif client_id and caller_owns_client(token_data, client_id):
+            # team/bank-токен может работать только со СВОИМИ клиентами;
+            # для чужих нужен межбанковский путь (x-requesting-bank + consent)
             target_client_id = client_id
         else:
-            raise HTTPException(401, "Unauthorized")
+            raise HTTPException(403, "Access denied")
     
     # Найти клиента
     result = await db.execute(
@@ -676,10 +700,12 @@ async def delete_card(
         # Локальный запрос
         if token_data.get("type") == "client":
             target_client_id = token_data.get("client_id")
-        elif client_id:
+        elif client_id and caller_owns_client(token_data, client_id):
+            # team/bank-токен может работать только со СВОИМИ клиентами;
+            # для чужих нужен межбанковский путь (x-requesting-bank + consent)
             target_client_id = client_id
         else:
-            raise HTTPException(401, "Unauthorized")
+            raise HTTPException(403, "Access denied")
     
     # Найти клиента
     result = await db.execute(
@@ -705,7 +731,7 @@ async def delete_card(
     # Удалить карту
     await db.delete(card)
     await db.commit()
-    
+
     return {
         "data": {
             "cardId": card_id,
@@ -714,5 +740,140 @@ async def delete_card(
         "meta": {
             "message": "Card deleted successfully"
         }
+    }
+
+
+@router.post("/{card_id}/pay", summary="7. Оплата картой")
+async def pay_with_card(
+    card_id: str,
+    request: CardPaymentRequest,
+    client_id: Optional[str] = Query(None, description="ID клиента (для bank_token)"),
+    x_requesting_bank: Optional[str] = Header(None, alias="X-Requesting-Bank"),
+    x_consent_id: Optional[str] = Header(None, alias="X-Consent-Id"),
+    token_data: dict = Depends(require_any_token),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Оплата картой — списание со счёта, к которому привязана карта.
+
+    Проверяется: статус карты (active), срок действия, баланс счёта и
+    **дневной/месячный лимиты** карты. Создаётся транзакция с мерчантом.
+
+    **Межбанковый доступ:** согласие с permission `ManageCards`.
+    """
+    # Определяем, чей это запрос (как в остальных card-эндпоинтах)
+    if x_requesting_bank:
+        if not client_id:
+            raise HTTPException(400, "client_id required for interbank requests")
+        consent = await ConsentService.check_consent(
+            db=db, client_person_id=client_id, requesting_bank=x_requesting_bank,
+            permissions=["ManageCards"], consent_id=x_consent_id,
+        )
+        if not consent:
+            raise HTTPException(403, {
+                "error": "CONSENT_REQUIRED",
+                "message": "Valid consent with 'ManageCards' permission required",
+            })
+        target_client_id = client_id
+    else:
+        if token_data.get("type") == "client":
+            target_client_id = token_data.get("client_id")
+        elif client_id and caller_owns_client(token_data, client_id):
+            target_client_id = client_id
+        else:
+            raise HTTPException(403, "Access denied")
+
+    client = (await db.execute(
+        select(Client).where(Client.person_id == target_client_id)
+    )).scalar_one_or_none()
+    if not client:
+        raise HTTPException(404, "Client not found")
+
+    # Карта + счёт (с блокировкой строки счёта)
+    row = (await db.execute(
+        select(Card, Account).join(Account, Card.account_id == Account.id).where(
+            Card.card_id == card_id, Card.client_id == client.id
+        ).with_for_update(of=Account)
+    )).first()
+    if not row:
+        raise HTTPException(404, "Card not found")
+    card, account = row
+
+    # Сумма
+    try:
+        amount = Decimal(str(request.amount))
+    except (InvalidOperation, TypeError):
+        raise HTTPException(400, "Invalid amount")
+    if amount <= 0:
+        raise HTTPException(400, "Amount must be positive")
+
+    # Статус карты и срок действия
+    if card.status != "active":
+        raise HTTPException(400, f"Card is not active (status: {card.status})")
+    now = datetime.utcnow()
+    if (card.expiry_year, card.expiry_month) < (now.year, now.month):
+        raise HTTPException(400, "Card expired")
+
+    # Баланс
+    if account.balance < amount:
+        raise HTTPException(400, "Insufficient funds")
+
+    # Лимиты карты (сумма дебетов по карте за день/месяц)
+    day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    month_start = day_start.replace(day=1)
+
+    async def _spent_since(since):
+        return Decimal(str((await db.execute(
+            select(func.coalesce(func.sum(Transaction.amount), 0)).where(
+                Transaction.card_id == card.id,
+                Transaction.direction == "debit",
+                Transaction.transaction_date >= since,
+            )
+        )).scalar() or 0))
+
+    if card.daily_limit and (await _spent_since(day_start)) + amount > card.daily_limit:
+        raise HTTPException(400, f"Daily card limit exceeded ({card.daily_limit})")
+    if card.monthly_limit and (await _spent_since(month_start)) + amount > card.monthly_limit:
+        raise HTTPException(400, f"Monthly card limit exceeded ({card.monthly_limit})")
+
+    # Привязать мерчанта, если такой существует по имени
+    merchant = None
+    if request.merchant_name:
+        merchant = (await db.execute(
+            select(Merchant).where(Merchant.name == request.merchant_name)
+        )).scalars().first()
+
+    # Списать и записать транзакцию
+    account.balance -= amount
+    tx = Transaction(
+        account_id=account.id,
+        transaction_id=f"tx-{uuid.uuid4().hex[:12]}",
+        amount=amount, direction="debit", currency=account.currency or "RUB",
+        card_id=card.id,
+        merchant_id=merchant.id if merchant else None,
+        counterparty=request.merchant_name or "POS",
+        description=request.description or (f"Оплата: {request.merchant_name}" if request.merchant_name else "Оплата картой"),
+        status="completed", bank_transaction_code="PointOfSale",
+        transaction_city=request.city,
+        transaction_country="RUS" if request.city else None,
+        transaction_date=now, booking_date=now,
+    )
+    db.add(tx)
+    await db.commit()
+    await db.refresh(account)
+
+    return {
+        "data": {
+            "transactionId": tx.transaction_id,
+            "cardId": card.card_id,
+            "amount": str(amount),
+            "currency": tx.currency,
+            "accountNumber": account.account_number,
+            "accountBalance": str(account.balance),
+            "merchant": request.merchant_name,
+            "status": "completed",
+            "createdAt": now.isoformat() + "Z",
+        },
+        "meta": {"message": "Card payment processed"}
     }
 

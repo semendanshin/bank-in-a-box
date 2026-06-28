@@ -6,13 +6,22 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from pydantic import BaseModel
 from decimal import Decimal
-from datetime import datetime
+from datetime import datetime, timedelta
 import uuid
 
 from database import get_db
-from models import Product, ConsentRequest, Client, Account, ProductAgreement
+from models import Product, ConsentRequest, Consent, Client, Account, ProductAgreement
+from services.auth_service import require_banker
 
-router = APIRouter(prefix="/banker", tags=["Internal: Banker"], include_in_schema=False)
+# Весь /banker требует banker-токен (POST /auth/banker-login).
+# Раньше эндпоинты были открыты — любой мог читать балансы всех клиентов,
+# менять продукты/ставки и одобрять запросы согласий.
+router = APIRouter(
+    prefix="/banker",
+    tags=["Internal: Banker"],
+    include_in_schema=False,
+    dependencies=[Depends(require_banker)],
+)
 
 
 class ProductUpdate(BaseModel):
@@ -205,15 +214,34 @@ async def approve_consent(
     
     if consent.status != "pending":
         raise HTTPException(400, "Consent already processed")
-    
+
     consent.status = "approved"
     consent.responded_at = datetime.utcnow()
-    
+
+    # Создать активное согласие — иначе одобрение не выдаёт реального доступа
+    # (check_consent смотрит в таблицу Consent, а не в статус запроса).
+    new_consent_id = None
+    if consent.client_id is not None:
+        new_consent_id = f"consent-{uuid.uuid4().hex[:12]}"
+        db.add(Consent(
+            consent_id=new_consent_id,
+            request_id=consent.id,
+            client_id=consent.client_id,
+            granted_to=consent.requesting_bank,
+            permissions=consent.permissions,
+            status="active",
+            expiration_date_time=datetime.utcnow() + timedelta(days=90),
+            creation_date_time=datetime.utcnow(),
+            status_update_date_time=datetime.utcnow(),
+            signed_at=datetime.utcnow(),
+        ))
+
     await db.commit()
-    
+
     return {
         "data": {
             "request_id": consent.request_id,
+            "consent_id": new_consent_id,
             "status": "approved"
         },
         "meta": {
@@ -259,10 +287,14 @@ async def reject_consent(
 
 # === Client Management ===
 
-@router.get("/clients")
+@router.get("/clients/summary")
 async def get_clients(db: AsyncSession = Depends(get_db)):
     """
-    Получить список всех клиентов банка с агрегированными данными
+    Получить список клиентов банка с агрегированными данными
+    (счета, суммарный баланс, число договоров).
+
+    Примечание: GET /banker/clients отдаёт «плоский» список; этот эндпоинт —
+    обогащённый, на отдельном пути, чтобы маршруты не конфликтовали.
     """
     result = await db.execute(select(Client))
     clients = result.scalars().all()

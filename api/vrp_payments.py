@@ -4,16 +4,17 @@ OpenBanking Russia VRP API v1.3.1
 """
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, func
 from pydantic import BaseModel
 from typing import Optional
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from datetime import datetime, timedelta
 import uuid
 
 from database import get_db
-from models import VRPPayment, VRPConsent, Account, Transaction
-from services.auth_service import require_client
+from models import VRPPayment, VRPConsent, Account, Transaction, Client
+from services.auth_service import require_client, caller_owns_client
+from services.payment_service import PaymentService
 
 router = APIRouter(
     prefix="/domestic-vrp-payments",
@@ -67,25 +68,82 @@ async def create_vrp_payment(
         raise HTTPException(404, "VRP Consent not found")
     
     consent, account = consent_data
-    
+
+    # Проверить, что согласие принадлежит текущему клиенту
+    # (иначе любой клиент мог бы инициировать платёж по чужому согласию)
+    client_result = await db.execute(
+        select(Client).where(Client.person_id == current_client["client_id"])
+    )
+    client = client_result.scalar_one_or_none()
+    if not client or consent.client_id != client.id:
+        raise HTTPException(403, "VRP Consent does not belong to the authenticated client")
+
     # Проверить статус согласия
     if consent.status != "Authorised":
         raise HTTPException(400, f"VRP Consent is not authorised. Status: {consent.status}")
-    
+
     # Проверить срок действия
     if consent.valid_to and datetime.utcnow() > consent.valid_to:
         consent.status = "Expired"
         await db.commit()
         raise HTTPException(400, "VRP Consent has expired")
-    
+
+    # Валидация суммы
+    try:
+        amount = Decimal(str(request.amount))
+    except (InvalidOperation, TypeError):
+        raise HTTPException(400, "Invalid amount format")
+    if amount <= 0:
+        raise HTTPException(400, "Amount must be positive")
+
     # Проверить лимит на одну транзакцию
-    amount = Decimal(str(request.amount))
     if consent.max_individual_amount and amount > consent.max_individual_amount:
         raise HTTPException(
             400,
             f"Amount {amount} exceeds max individual amount {consent.max_individual_amount}"
         )
-    
+
+    # Проверить лимит количества платежей по согласию
+    if consent.max_payments_count:
+        count_result = await db.execute(
+            select(func.count(VRPPayment.id)).where(
+                VRPPayment.vrp_consent_id == consent.consent_id,
+                VRPPayment.status != "Rejected"
+            )
+        )
+        payments_count = count_result.scalar() or 0
+        if payments_count >= consent.max_payments_count:
+            raise HTTPException(
+                400,
+                f"VRP payments count limit reached ({consent.max_payments_count})"
+            )
+
+    # Проверить лимит суммы за период (скользящее окно от текущего момента)
+    if consent.max_amount_period:
+        period_deltas = {
+            "day": timedelta(days=1),
+            "week": timedelta(weeks=1),
+            "month": timedelta(days=30),
+            "year": timedelta(days=365),
+        }
+        period_start = datetime.utcnow() - period_deltas.get(
+            consent.period_type, timedelta(days=30)
+        )
+        sum_result = await db.execute(
+            select(func.coalesce(func.sum(VRPPayment.amount), 0)).where(
+                VRPPayment.vrp_consent_id == consent.consent_id,
+                VRPPayment.status != "Rejected",
+                VRPPayment.executed_at >= period_start
+            )
+        )
+        spent_in_period = Decimal(str(sum_result.scalar() or 0))
+        if spent_in_period + amount > consent.max_amount_period:
+            raise HTTPException(
+                400,
+                f"Amount {amount} exceeds remaining period limit. "
+                f"Spent: {spent_in_period}, Limit: {consent.max_amount_period}"
+            )
+
     # Проверить баланс
     if account.balance < amount:
         raise HTTPException(
@@ -95,21 +153,25 @@ async def create_vrp_payment(
     
     # Создать платеж
     payment_id = f"vrp-pay-{uuid.uuid4().hex[:12]}"
-    
-    # Списать со счета
-    account.balance -= amount
-    
-    # Создать транзакцию
-    transaction = Transaction(
-        account_id=account.id,
-        transaction_id=f"tx-{uuid.uuid4().hex[:12]}",
-        amount=amount,
-        direction="debit",
-        counterparty=request.destination_account,
-        description=request.description or f"VRP Payment to {request.destination_account}"
-    )
-    db.add(transaction)
-    
+
+    # Реальное движение средств через PaymentService: деньги действительно
+    # зачисляются получателю (внутри банка) или уходят межбанком, с откатом
+    # при неудаче — а не просто списываются «в никуда».
+    try:
+        payment, _interbank = await PaymentService.initiate_payment(
+            db=db,
+            from_account_number=account.account_number,
+            to_account_number=request.destination_account,
+            amount=amount,
+            description=request.description or f"VRP Payment to {request.destination_account}",
+            target_bank_hint=request.destination_bank,
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+    if payment.status != "AcceptedSettlementCompleted":
+        raise HTTPException(400, "VRP payment could not be completed (transfer rejected)")
+
     # Определить дату следующего платежа
     next_payment_date = None
     if request.is_recurring:
@@ -192,9 +254,16 @@ async def get_vrp_payment(
     
     if not payment_data:
         raise HTTPException(404, "VRP Payment not found")
-    
+
     payment, account = payment_data
-    
+
+    # Платёж может смотреть только владелец счёта
+    owner = (await db.execute(
+        select(Client).where(Client.id == account.client_id)
+    )).scalar_one_or_none()
+    if not owner or not caller_owns_client(current_client, owner.person_id):
+        raise HTTPException(403, "Access denied")
+
     return {
         "data": {
             "payment_id": payment.payment_id,

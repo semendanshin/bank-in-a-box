@@ -2,7 +2,7 @@
 Interbank API - Прием межбанковских переводов
 Используется для коммуникации между банками
 """
-from fastapi import APIRouter, Depends, HTTPException, Header
+from fastapi import APIRouter, Depends, HTTPException, Header, Response
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -45,6 +45,7 @@ class InterbankTransferResponse(BaseModel):
 @router.post("/receive", response_model=InterbankTransferResponse, status_code=201)
 async def receive_interbank_transfer(
     request: InterbankTransferRequest,
+    response: Response,
     x_bank_auth_token: Optional[str] = Header(None, alias="x-bank-auth-token"),
     db: AsyncSession = Depends(get_db)
 ):
@@ -77,30 +78,67 @@ async def receive_interbank_transfer(
     ```
     """
     
-    # TODO: Проверить x_bank_auth_token (в продакшене)
-    # В MVP пропускаем для упрощения
-    
+    # --- Аутентификация вызывающего банка ---
+    # Если задан общий секрет — требуем точного совпадения.
+    # Иначе (MVP) — требуем хотя бы наличие токена, чтобы отсечь
+    # полностью анонимные запросы (иначе любой мог бы "напечатать" деньги).
+    if config.INTERBANK_SHARED_SECRET:
+        if x_bank_auth_token != config.INTERBANK_SHARED_SECRET:
+            raise HTTPException(401, "Invalid interbank auth token")
+    elif not x_bank_auth_token:
+        raise HTTPException(401, "Missing x-bank-auth-token")
+
+    # Базовая валидация отправителя
+    if not request.from_bank:
+        raise HTTPException(400, "from_bank is required")
+    if request.from_bank == config.BANK_CODE:
+        raise HTTPException(400, "from_bank cannot be this bank")
+
+    # --- Идемпотентность ---
+    # Повторный вызов с тем же transfer_id (например, ретрай после таймаута
+    # на стороне отправителя) НЕ должен зачислять деньги повторно.
+    existing = await db.execute(
+        select(InterbankTransfer).where(InterbankTransfer.transfer_id == request.transfer_id)
+    )
+    existing_transfer = existing.scalar_one_or_none()
+    if existing_transfer:
+        response.status_code = 200
+        return InterbankTransferResponse(
+            success=True,
+            transfer_id=request.transfer_id,
+            message="Transfer already processed (idempotent replay)",
+            credited_at=existing_transfer.completed_at.isoformat() + "Z" if existing_transfer.completed_at else None
+        )
+
     try:
         amount = Decimal(request.amount)
-        
-        # 1. Найти счет получателя
+
+        if amount <= 0:
+            raise HTTPException(400, "Amount must be positive")
+
+        # 1. Найти счет получателя (с блокировкой строки)
         result = await db.execute(
-            select(Account).where(Account.account_number == request.to_account_number)
+            select(Account)
+            .where(Account.account_number == request.to_account_number)
+            .with_for_update()
         )
         to_account = result.scalar_one_or_none()
-        
+
         if not to_account:
             raise HTTPException(404, f"Account {request.to_account_number} not found in {config.BANK_CODE}")
-        
+
+        if to_account.status and to_account.status != "active":
+            raise HTTPException(400, f"Account {request.to_account_number} is not active")
+
         # 2. Зачислить деньги на счет
         to_account.balance += amount
         
         # 3. Создать транзакцию (Credit - зачисление)
         transaction = Transaction(
             account_id=to_account.id,
-            transaction_type="Credit",
+            transaction_id=f"tx-{uuid.uuid4().hex[:12]}",
             amount=amount,
-            balance_after=to_account.balance,
+            direction="credit",
             description=f"Входящий перевод из {request.from_bank}: {request.description}",
             transaction_date=datetime.utcnow()
         )
@@ -157,8 +195,14 @@ async def check_account_exists(
     - 200 OK - если счет существует
     - 404 Not Found - если счет не найден
     """
-    # TODO: Проверить x_bank_auth_token (в продакшене)
-    
+    # Аутентификация: тот же принцип, что и в /receive — отсекаем
+    # анонимный перебор номеров счетов.
+    if config.INTERBANK_SHARED_SECRET:
+        if x_bank_auth_token != config.INTERBANK_SHARED_SECRET:
+            raise HTTPException(401, "Invalid interbank auth token")
+    elif not x_bank_auth_token:
+        raise HTTPException(401, "Missing x-bank-auth-token")
+
     result = await db.execute(
         select(Account).where(Account.account_number == account_number)
     )

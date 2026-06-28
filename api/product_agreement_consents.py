@@ -27,7 +27,7 @@ try:
         Notification,
         BankSettings
     )
-    from services.auth_service import require_bank, require_banker, require_any_token
+    from services.auth_service import require_bank, require_banker, require_any_token, require_client
 except ImportError:
     from database import get_db
     from models import (
@@ -37,7 +37,7 @@ except ImportError:
         Notification,
         BankSettings
     )
-    from services.auth_service import require_bank, require_banker, require_any_token
+    from services.auth_service import require_bank, require_banker, require_any_token, require_client
 
 
 router = APIRouter(

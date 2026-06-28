@@ -38,8 +38,8 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None, u
     # Для bank tokens используем RS256
     if use_rs256:
         try:
-            # Загрузить приватный ключ
-            keys_path = Path(__file__).parent.parent.parent.parent / "shared" / "keys"
+            # Загрузить приватный ключ (shared/keys лежит в корне репозитория)
+            keys_path = Path(__file__).parent.parent / "shared" / "keys"
             private_key_path = keys_path / f"{config.BANK_CODE}_private.pem"
             
             if not private_key_path.exists():
@@ -103,7 +103,7 @@ async def verify_rs256_token(token: str, bank_code: str) -> dict:
     """Проверка RS256 токена через JWKS"""
     try:
         # Попробовать загрузить JWKS из локального файла
-        keys_path = Path(__file__).parent.parent.parent.parent / "shared" / "keys"
+        keys_path = Path(__file__).parent.parent / "shared" / "keys"
         public_key_path = keys_path / f"{bank_code}_public.pem"
         
         if public_key_path.exists():
@@ -337,6 +337,24 @@ async def require_any_token(
             detail=ERROR_INSUFFICIENT_PERMISSIONS,
             headers={"WWW-Authenticate": "Bearer"}
         )
+
+
+def caller_owns_client(token_data: dict, person_id: str) -> bool:
+    """
+    Имеет ли вызывающий токен право действовать от имени клиента person_id.
+
+    - client-токен: его person_id (sub) совпадает с person_id клиента;
+    - team/bank-токен: команда владеет своими клиентами (team200 -> team200-1).
+
+    Для межбанковского доступа к ЧУЖИМ клиентам это вернёт False — там нужен
+    отдельный путь через согласие (x-requesting-bank + consent).
+    """
+    if not person_id:
+        return False
+    caller = token_data.get("client_id")
+    if not caller:
+        return False
+    return person_id == caller or person_id.startswith(f"{caller}-")
 
 
 def hash_password(password: str) -> str:
