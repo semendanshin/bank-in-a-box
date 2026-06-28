@@ -337,12 +337,18 @@ async def get_payment(
         raise HTTPException(401, "Unauthorized")
 
     payment = await PaymentService.get_payment(db, payment_id)
-    
+
     if not payment:
         raise HTTPException(404, "Payment not found")
-    
-    # TODO: Проверить что клиент имеет право просматривать этот платеж
-    
+
+    # Платёж может смотреть только владелец счёта списания
+    owner = (await db.execute(
+        select(Client).join(Account, Account.client_id == Client.id)
+        .where(Account.id == payment.account_id)
+    )).scalar_one_or_none()
+    if not owner or not caller_owns_client(token_data, owner.person_id):
+        raise HTTPException(403, "Access denied")
+
     payment_data = PaymentData(
         paymentId=payment.payment_id,
         status=payment.status,

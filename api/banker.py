@@ -287,10 +287,14 @@ async def reject_consent(
 
 # === Client Management ===
 
-@router.get("/clients")
+@router.get("/clients/summary")
 async def get_clients(db: AsyncSession = Depends(get_db)):
     """
-    Получить список всех клиентов банка с агрегированными данными
+    Получить список клиентов банка с агрегированными данными
+    (счета, суммарный баланс, число договоров).
+
+    Примечание: GET /banker/clients отдаёт «плоский» список; этот эндпоинт —
+    обогащённый, на отдельном пути, чтобы маршруты не конфликтовали.
     """
     result = await db.execute(select(Client))
     clients = result.scalars().all()

@@ -13,7 +13,8 @@ import uuid
 
 from database import get_db
 from models import VRPPayment, VRPConsent, Account, Transaction, Client
-from services.auth_service import require_client
+from services.auth_service import require_client, caller_owns_client
+from services.payment_service import PaymentService
 
 router = APIRouter(
     prefix="/domestic-vrp-payments",
@@ -152,21 +153,25 @@ async def create_vrp_payment(
     
     # Создать платеж
     payment_id = f"vrp-pay-{uuid.uuid4().hex[:12]}"
-    
-    # Списать со счета
-    account.balance -= amount
-    
-    # Создать транзакцию
-    transaction = Transaction(
-        account_id=account.id,
-        transaction_id=f"tx-{uuid.uuid4().hex[:12]}",
-        amount=amount,
-        direction="debit",
-        counterparty=request.destination_account,
-        description=request.description or f"VRP Payment to {request.destination_account}"
-    )
-    db.add(transaction)
-    
+
+    # Реальное движение средств через PaymentService: деньги действительно
+    # зачисляются получателю (внутри банка) или уходят межбанком, с откатом
+    # при неудаче — а не просто списываются «в никуда».
+    try:
+        payment, _interbank = await PaymentService.initiate_payment(
+            db=db,
+            from_account_number=account.account_number,
+            to_account_number=request.destination_account,
+            amount=amount,
+            description=request.description or f"VRP Payment to {request.destination_account}",
+            target_bank_hint=request.destination_bank,
+        )
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+    if payment.status != "AcceptedSettlementCompleted":
+        raise HTTPException(400, "VRP payment could not be completed (transfer rejected)")
+
     # Определить дату следующего платежа
     next_payment_date = None
     if request.is_recurring:
@@ -249,9 +254,16 @@ async def get_vrp_payment(
     
     if not payment_data:
         raise HTTPException(404, "VRP Payment not found")
-    
+
     payment, account = payment_data
-    
+
+    # Платёж может смотреть только владелец счёта
+    owner = (await db.execute(
+        select(Client).where(Client.id == account.client_id)
+    )).scalar_one_or_none()
+    if not owner or not caller_owns_client(current_client, owner.person_id):
+        raise HTTPException(403, "Access denied")
+
     return {
         "data": {
             "payment_id": payment.payment_id,

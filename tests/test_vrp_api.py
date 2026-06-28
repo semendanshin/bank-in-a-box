@@ -2,7 +2,9 @@
 Тесты VRP: применение лимитов и проверка владельца согласия
 (раньше лимиты периода/количества не проверялись, владелец не сверялся).
 """
-from _helpers import add_account, account_id, client_token, auth
+from decimal import Decimal
+
+from _helpers import add_account, account_id, get_balance, client_token, auth
 
 
 async def _create_consent(client, owner, acc_id, max_individual=10000, max_count=None, max_period=None):
@@ -19,17 +21,18 @@ async def _create_consent(client, owner, acc_id, max_individual=10000, max_count
     return r.json()["data"]["consent_id"]
 
 
-async def _pay(client, owner, consent_id, amount):
+async def _pay(client, owner, consent_id, amount, destination="DEST"):
     return await client.post("/domestic-vrp-payments", headers=auth(client_token(owner)), json={
         "vrp_consent_id": consent_id,
         "amount": amount,
-        "destination_account": "40817820000000000999",
+        "destination_account": destination,
         "is_recurring": False,
     })
 
 
 async def test_vrp_payment_count_limit(client, session_maker):
     await add_account(session_maker, "team218-1", "AAA", "1000000")
+    await add_account(session_maker, "team218-1", "DEST", "0")
     acc_id = await account_id(session_maker, "AAA")
     consent_id = await _create_consent(client, "team218-1", acc_id, max_count=1)
 
@@ -42,6 +45,7 @@ async def test_vrp_payment_count_limit(client, session_maker):
 
 async def test_vrp_period_amount_limit(client, session_maker):
     await add_account(session_maker, "team218-1", "AAA", "1000000")
+    await add_account(session_maker, "team218-1", "DEST", "0")
     acc_id = await account_id(session_maker, "AAA")
     consent_id = await _create_consent(client, "team218-1", acc_id,
                                        max_individual=10000, max_period=1500)
@@ -61,6 +65,19 @@ async def test_vrp_individual_limit(client, session_maker):
 
     r = await _pay(client, "team218-1", consent_id, 1000)
     assert r.status_code == 400  # больше max_individual_amount
+
+
+async def test_vrp_payment_credits_destination(client, session_maker):
+    # Деньги должны реально зачисляться получателю (внутрибанк)
+    await add_account(session_maker, "team218-1", "AAA", "10000")
+    await add_account(session_maker, "team218-1", "DEST", "0")
+    acc_id = await account_id(session_maker, "AAA")
+    consent_id = await _create_consent(client, "team218-1", acc_id, max_individual=10000)
+
+    r = await _pay(client, "team218-1", consent_id, 1000)
+    assert r.status_code == 201, r.text
+    assert await get_balance(session_maker, "AAA") == Decimal("9000.00")
+    assert await get_balance(session_maker, "DEST") == Decimal("1000.00")
 
 
 async def test_vrp_consent_ownership(client, session_maker):

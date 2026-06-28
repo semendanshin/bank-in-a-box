@@ -69,26 +69,30 @@ class CardPaymentRequest(BaseModel):
 
 # === Helper Functions ===
 
+def _luhn_check_digit(number_without_check: str) -> str:
+    """Контрольная цифра по настоящему алгоритму Луна."""
+    total = 0
+    for i, ch in enumerate(reversed(number_without_check)):
+        d = int(ch)
+        if i % 2 == 0:  # удваиваем каждую вторую цифру (с конца)
+            d *= 2
+            if d > 9:
+                d -= 9
+        total += d
+    return str((10 - total % 10) % 10)
+
+
 def generate_card_number(bank_code: str) -> str:
-    """Генерация номера карты (16 цифр) по алгоритму Луна"""
-    # BIN коды для разных банков
+    """Генерация валидного по Луну номера карты (16 цифр) для банка."""
     bins = {
         'vbank': '427610',
         'abank': '427620',
-        'sbank': '427630'
+        'sbank': '427630',
     }
-    
-    from config import config
-    bin_code = bins.get(config.BANK_CODE, '427600')
-    
-    # 9 случайных цифр
-    account_number = ''.join([str(random.randint(0, 9)) for _ in range(9)])
-    
-    # Контрольная цифра по алгоритму Луна (упрощенная версия)
-    card_without_check = bin_code + account_number
-    check_digit = str((10 - sum(int(d) for d in card_without_check) % 10) % 10)
-    
-    return card_without_check + check_digit
+    bin_code = bins.get(bank_code, '427600')
+    body = ''.join(str(random.randint(0, 9)) for _ in range(9))
+    base = bin_code + body  # 15 цифр
+    return base + _luhn_check_digit(base)
 
 
 def mask_card_number(card_number: str) -> str:
