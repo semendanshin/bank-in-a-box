@@ -13,6 +13,7 @@ import uuid
 from database import get_db
 from models import ProductAgreement, Product, Client, Account, BankCapital, Transaction
 from services.auth_service import require_any_token
+from utils import parse_account_id
 
 router = APIRouter(prefix="/product-agreements", tags=["7 Договоры с продуктами"])
 
@@ -164,7 +165,7 @@ async def create_agreement(
         
         # Списать средства со source account
         if True:  # Always true now
-            source_acc_id = int(request.source_account_id.replace("acc-", ""))
+            source_acc_id = parse_account_id(request.source_account_id)
             source_acc_result = await db.execute(
                 select(Account).where(Account.id == source_acc_id, Account.client_id == client.id)
             )
@@ -428,7 +429,7 @@ async def close_agreement(
             raise HTTPException(400, f"Loan has debt of {loan_account.balance}. Repayment required. Provide repayment_account_id.")
         
         # Получить счет для погашения
-        repay_acc_id = int(request.repayment_account_id.replace("acc-", ""))
+        repay_acc_id = parse_account_id(request.repayment_account_id)
         repay_result = await db.execute(
             select(Account).where(Account.id == repay_acc_id, Account.client_id == client.id)
         )
@@ -482,7 +483,7 @@ async def close_agreement(
         deposit_balance = loan_account.balance
         dest_account = None
         if request and request.repayment_account_id:
-            dest_acc_id = int(request.repayment_account_id.replace("acc-", ""))
+            dest_acc_id = parse_account_id(request.repayment_account_id)
             dest_account = (await db.execute(
                 select(Account).where(Account.id == dest_acc_id, Account.client_id == client.id)
             )).scalar_one_or_none()

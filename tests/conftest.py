@@ -14,17 +14,11 @@ os.environ.setdefault("DATABASE_URL", "postgresql://u:p@localhost/x")
 os.environ.setdefault("BANK_CODE", "vbank")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import json
+
 import pytest
 import pytest_asyncio
-from sqlalchemy import ARRAY
-from sqlalchemy.ext.compiler import compiles
-
-
-@compiles(ARRAY, "sqlite")
-def _array_sqlite(element, compiler, **kw):  # noqa: ANN001
-    return "JSON"
-
-
+from sqlalchemy import ARRAY, String, TypeDecorator
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy.pool import StaticPool
 
@@ -32,6 +26,26 @@ import models
 import main
 import middleware as mw
 from database import get_db
+
+
+class _JSONList(TypeDecorator):
+    """ARRAY(String) -> JSON-строка для SQLite (postgres-ARRAY там не работает)."""
+    impl = String
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        return json.dumps(value) if value is not None else None
+
+    def process_result_value(self, value, dialect):
+        return json.loads(value) if value else None
+
+
+# Подменяем ARRAY-колонки на JSON только в тестовой схеме (in-memory SQLite),
+# чтобы можно было писать/читать списки (permissions) без postgres.
+for _table in models.Base.metadata.tables.values():
+    for _col in _table.columns:
+        if isinstance(_col.type, ARRAY):
+            _col.type = _JSONList()
 
 
 @pytest_asyncio.fixture

@@ -6,11 +6,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from pydantic import BaseModel
 from decimal import Decimal
-from datetime import datetime
+from datetime import datetime, timedelta
 import uuid
 
 from database import get_db
-from models import Product, ConsentRequest, Client, Account, ProductAgreement
+from models import Product, ConsentRequest, Consent, Client, Account, ProductAgreement
 from services.auth_service import require_banker
 
 # Весь /banker требует banker-токен (POST /auth/banker-login).
@@ -214,15 +214,34 @@ async def approve_consent(
     
     if consent.status != "pending":
         raise HTTPException(400, "Consent already processed")
-    
+
     consent.status = "approved"
     consent.responded_at = datetime.utcnow()
-    
+
+    # Создать активное согласие — иначе одобрение не выдаёт реального доступа
+    # (check_consent смотрит в таблицу Consent, а не в статус запроса).
+    new_consent_id = None
+    if consent.client_id is not None:
+        new_consent_id = f"consent-{uuid.uuid4().hex[:12]}"
+        db.add(Consent(
+            consent_id=new_consent_id,
+            request_id=consent.id,
+            client_id=consent.client_id,
+            granted_to=consent.requesting_bank,
+            permissions=consent.permissions,
+            status="active",
+            expiration_date_time=datetime.utcnow() + timedelta(days=90),
+            creation_date_time=datetime.utcnow(),
+            status_update_date_time=datetime.utcnow(),
+            signed_at=datetime.utcnow(),
+        ))
+
     await db.commit()
-    
+
     return {
         "data": {
             "request_id": consent.request_id,
+            "consent_id": new_consent_id,
             "status": "approved"
         },
         "meta": {

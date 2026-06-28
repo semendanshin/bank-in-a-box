@@ -14,6 +14,7 @@ import uuid
 from database import get_db
 from models import VRPConsent, Account, Client
 from services.auth_service import require_client
+from utils import parse_account_id
 
 router = APIRouter(
     prefix="/vrp-consents",
@@ -107,7 +108,7 @@ async def create_vrp_consent(
         raise HTTPException(404, "Client not found")
     
     # Найти счет
-    account_id_int = int(request.account_id.replace("acc-", ""))
+    account_id_int = parse_account_id(request.account_id)
     account_result = await db.execute(
         select(Account).where(
             Account.id == account_id_int,

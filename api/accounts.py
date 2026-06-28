@@ -15,6 +15,7 @@ from database import get_db
 from models import Account, Client, Transaction, BankCapital, Merchant, Card
 from services.auth_service import require_any_token, require_client, caller_owns_client
 from services.consent_service import ConsentService
+from utils import parse_account_id
 from sqlalchemy.orm import selectinload
 
 
@@ -193,7 +194,7 @@ async def get_account(
     **Требует:** Client token (для своих счетов) или Bank token с согласием (межбанк)
     """
     # Извлекаем ID из строки "acc-123"
-    acc_id = int(account_id.replace("acc-", ""))
+    acc_id = parse_account_id(account_id)
 
     result = await db.execute(select(Account).where(Account.id == acc_id))
     account = result.scalar_one_or_none()
@@ -234,7 +235,7 @@ async def get_balances(
     
     **Требует:** Client token (для своих счетов) или Bank token с согласием (межбанк)
     """
-    acc_id = int(account_id.replace("acc-", ""))
+    acc_id = parse_account_id(account_id)
 
     result = await db.execute(
         select(Account).where(Account.id == acc_id)
@@ -299,7 +300,7 @@ async def get_transactions(
     - `GET /accounts/acc-1/transactions?page=2&limit=100` — следующие 100 транзакций
     - `GET /accounts/acc-1/transactions?limit=200` — первые 200 транзакций
     """
-    acc_id = int(account_id.replace("acc-", ""))
+    acc_id = parse_account_id(account_id)
 
     acc_result = await db.execute(select(Account).where(Account.id == acc_id))
     account = acc_result.scalar_one_or_none()
@@ -592,7 +593,7 @@ async def update_account_status(
     - **bank_token**: укажите `client_id` в query параметре
     """
     # Извлечь ID
-    acc_id = int(account_id.replace("acc-", ""))
+    acc_id = parse_account_id(account_id)
 
     # Найти счет
     result = await db.execute(
@@ -694,7 +695,7 @@ async def close_account_with_balance(
             )
     
     # Извлечь ID
-    acc_id = int(account_id.replace("acc-", ""))
+    acc_id = parse_account_id(account_id)
     
     # Найти счет
     result = await db.execute(
@@ -720,7 +721,7 @@ async def close_account_with_balance(
         if not request.destination_account_id:
             raise HTTPException(400, "destination_account_id required for transfer action")
         
-        dest_acc_id = int(request.destination_account_id.replace("acc-", ""))
+        dest_acc_id = parse_account_id(request.destination_account_id)
         dest_result = await db.execute(
             select(Account).where(Account.id == dest_acc_id, Account.client_id == client.id)
         )

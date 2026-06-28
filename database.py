@@ -19,8 +19,13 @@ if DATABASE_URL.startswith("postgresql://"):
 else:
     ASYNC_DATABASE_URL = DATABASE_URL
 
-# Create async engine
-engine = create_async_engine(ASYNC_DATABASE_URL, echo=True)
+# Create async engine.
+# echo=True логирует КАЖДЫЙ SQL-запрос — удобно для отладки, но шумно и
+# медленно в проде. Управляется через SQL_ECHO (по умолчанию выключено).
+engine = create_async_engine(
+    ASYNC_DATABASE_URL,
+    echo=os.getenv("SQL_ECHO", "false").lower() == "true",
+)
 
 # Create async session maker
 AsyncSessionLocal = async_sessionmaker(

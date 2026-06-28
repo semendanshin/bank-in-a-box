@@ -387,20 +387,17 @@ async def delete_team(client_id: str, db: AsyncSession = Depends(get_db)):
     
     if not team:
         raise HTTPException(404, "Team not found")
-    
-    # Delete team's test clients
-    await db.execute(
-        select(Client).where(Client.person_id.like(f"{client_id}-%"))
-    )
-    # Note: Cascade delete should handle this, but we can be explicit
-    
-    # Delete team
+
+    # Удаляем только учётные данные команды. Тестовых клиентов НЕ трогаем:
+    # у них есть счета/карты/транзакции (внешние ключи), каскадное удаление
+    # упало бы по FK и стёрло бы финансовые данные. При необходимости команду
+    # лучше деактивировать (PUT /admin/teams/{id}/suspend).
     await db.delete(team)
     await db.commit()
-    
+
     return {
         "success": True,
-        "message": f"Команда {client_id} удалена"
+        "message": f"Команда {client_id} удалена (клиенты сохранены)"
     }
 
 

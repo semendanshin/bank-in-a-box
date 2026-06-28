@@ -369,13 +369,14 @@ async def create_card(
         select(Account).where(
             Account.account_number == request.account_number,
             Account.client_id == client.id,
-            Account.account_type.in_(['checking', 'savings'])
+            Account.account_type.in_(['checking', 'savings']),
+            Account.status == "active"
         )
     )
     account = account_result.scalar_one_or_none()
-    
+
     if not account:
-        raise HTTPException(404, "Account not found or invalid type. Only checking/savings accounts can have cards.")
+        raise HTTPException(404, "Active checking/savings account not found. Cards require an active account.")
     
     # Валидация типа карты
     if request.card_type not in ['debit', 'credit']:
