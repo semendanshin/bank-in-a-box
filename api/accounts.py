@@ -13,9 +13,40 @@ import uuid
 
 from database import get_db
 from models import Account, Client, Transaction, BankCapital, Merchant, Card
-from services.auth_service import require_any_token, require_client
+from services.auth_service import require_any_token, require_client, caller_owns_client
 from services.consent_service import ConsentService
 from sqlalchemy.orm import selectinload
+
+
+async def _authorize_account_access(db, token_data, account, x_requesting_bank, x_consent_id, permission):
+    """
+    Авторизовать доступ к данным счёта:
+    - владелец (свой client-токен или команда к своему клиенту) — разрешено;
+    - чужой клиент — только межбанк через действующее согласие;
+    - иначе 403.
+    """
+    owner = (await db.execute(select(Client).where(Client.id == account.client_id))).scalar_one_or_none()
+    owner_pid = owner.person_id if owner else None
+
+    if caller_owns_client(token_data, owner_pid):
+        return
+
+    if x_requesting_bank:
+        consent = await ConsentService.check_consent(
+            db=db,
+            client_person_id=owner_pid,
+            requesting_bank=x_requesting_bank,
+            permissions=[permission],
+            consent_id=x_consent_id,
+        )
+        if consent:
+            return
+        raise HTTPException(403, {
+            "error": "CONSENT_REQUIRED",
+            "message": "Требуется действующее согласие клиента",
+        })
+
+    raise HTTPException(403, "Access denied")
 
 
 router = APIRouter(prefix="/accounts", tags=["2 Счета и балансы"])
@@ -163,45 +194,15 @@ async def get_account(
     """
     # Извлекаем ID из строки "acc-123"
     acc_id = int(account_id.replace("acc-", ""))
-    
-    # Проверка согласия для межбанковых запросов
-    if x_requesting_bank and token_data.get("type") != "client":
-        # Найти счет чтобы получить client_id
-        temp_result = await db.execute(select(Account).where(Account.id == acc_id))
-        temp_account = temp_result.scalar_one_or_none()
-        if not temp_account:
-            raise HTTPException(404, "Account not found")
-        
-        temp_client_result = await db.execute(select(Client).where(Client.id == temp_account.client_id))
-        temp_client = temp_client_result.scalar_one_or_none()
-        if not temp_client:
-            raise HTTPException(404, "Client not found")
-        
-        # Проверить согласие
-        consent = await ConsentService.check_consent(
-            db=db,
-            client_person_id=temp_client.person_id,
-            requesting_bank=x_requesting_bank,
-            permissions=["ReadAccountsDetail"],
-            consent_id=x_consent_id
-        )
-        
-        if not consent:
-            raise HTTPException(403, {
-                "error": "CONSENT_REQUIRED",
-                "message": "Требуется согласие клиента для доступа к этому счету"
-            })
-    
-    result = await db.execute(
-        select(Account).where(Account.id == acc_id)
-    )
+
+    result = await db.execute(select(Account).where(Account.id == acc_id))
     account = result.scalar_one_or_none()
-    
     if not account:
         raise HTTPException(404, "Account not found")
-    
-    # TODO: Проверить права доступа
-    
+
+    await _authorize_account_access(
+        db, token_data, account, x_requesting_bank, x_consent_id, "ReadAccountsDetail")
+
     return {
         "data": {
             "account": [
@@ -234,37 +235,18 @@ async def get_balances(
     **Требует:** Client token (для своих счетов) или Bank token с согласием (межбанк)
     """
     acc_id = int(account_id.replace("acc-", ""))
-    
+
     result = await db.execute(
         select(Account).where(Account.id == acc_id)
     )
     account = result.scalar_one_or_none()
-    
+
     if not account:
         raise HTTPException(404, "Account not found")
-    
-    # Проверка согласия для межбанковых запросов
-    if x_requesting_bank and token_data.get("type") != "client":
-        client_result = await db.execute(select(Client).where(Client.id == account.client_id))
-        client = client_result.scalar_one_or_none()
-        if not client:
-            raise HTTPException(404, "Client not found")
-        
-        # Проверить согласие
-        consent = await ConsentService.check_consent(
-            db=db,
-            client_person_id=client.person_id,
-            requesting_bank=x_requesting_bank,
-            permissions=["ReadBalances"],
-            consent_id=x_consent_id
-        )
-        
-        if not consent:
-            raise HTTPException(403, {
-                "error": "CONSENT_REQUIRED",
-                "message": "Требуется согласие клиента для доступа к балансу"
-            })
-    
+
+    await _authorize_account_access(
+        db, token_data, account, x_requesting_bank, x_consent_id, "ReadBalances")
+
     return {
         "data": {
             "balance": [
@@ -318,35 +300,15 @@ async def get_transactions(
     - `GET /accounts/acc-1/transactions?limit=200` — первые 200 транзакций
     """
     acc_id = int(account_id.replace("acc-", ""))
-    
-    # Проверка согласия для межбанковых запросов
-    if x_requesting_bank and token_data.get("type") != "client":
-        # Найти счет чтобы получить client_id
-        temp_result = await db.execute(select(Account).where(Account.id == acc_id))
-        temp_account = temp_result.scalar_one_or_none()
-        if not temp_account:
-            raise HTTPException(404, "Account not found")
-        
-        client_result = await db.execute(select(Client).where(Client.id == temp_account.client_id))
-        client = client_result.scalar_one_or_none()
-        if not client:
-            raise HTTPException(404, "Client not found")
-        
-        # Проверить согласие
-        consent = await ConsentService.check_consent(
-            db=db,
-            client_person_id=client.person_id,
-            requesting_bank=x_requesting_bank,
-            permissions=["ReadTransactionsDetail"],
-            consent_id=x_consent_id
-        )
-        
-        if not consent:
-            raise HTTPException(403, {
-                "error": "CONSENT_REQUIRED",
-                "message": "Требуется согласие клиента для доступа к транзакциям"
-            })
-    
+
+    acc_result = await db.execute(select(Account).where(Account.id == acc_id))
+    account = acc_result.scalar_one_or_none()
+    if not account:
+        raise HTTPException(404, "Account not found")
+
+    await _authorize_account_access(
+        db, token_data, account, x_requesting_bank, x_consent_id, "ReadTransactionsDetail")
+
     # Валидация параметров
     if page < 1:
         page = 1
@@ -629,18 +591,9 @@ async def update_account_status(
     - **client_token**: `client_id` определится автоматически
     - **bank_token**: укажите `client_id` в query параметре
     """
-    # Определить client_id (либо из токена, либо из параметра для bank_token)
-    target_client_id = None
-    if token_data.get("type") == "client":
-        target_client_id = token_data.get("client_id")
-    elif client_id:
-        target_client_id = client_id
-    else:
-        raise HTTPException(401, "Unauthorized. Укажите client_id или используйте client_token")
-    
     # Извлечь ID
     acc_id = int(account_id.replace("acc-", ""))
-    
+
     # Найти счет
     result = await db.execute(
         select(Account, Client)
@@ -648,14 +601,15 @@ async def update_account_status(
         .where(Account.id == acc_id)
     )
     account_data = result.first()
-    
+
     if not account_data:
         raise HTTPException(404, "Account not found")
-    
+
     account, client = account_data
-    
-    # Проверить что это счет текущего клиента
-    if client.person_id != target_client_id:
+
+    # Счёт должен принадлежать вызывающему (свой client-токен либо команда
+    # к своему клиенту). Чужими счетами через этот endpoint управлять нельзя.
+    if not caller_owns_client(token_data, client.person_id):
         raise HTTPException(403, "Access denied")
     
     # Проверить валидность статуса

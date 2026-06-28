@@ -12,8 +12,16 @@ from datetime import datetime
 
 from database import get_db
 from models import BankCapital, InterbankTransfer, Payment, Account, BankSettings, KeyRateHistory, Team, ConsentRequest, Client, Consent
+from services.auth_service import require_banker
 
-router = APIRouter(prefix="/admin", tags=["Internal: Admin"], include_in_schema=False)
+# Весь /admin требует banker-токен (POST /auth/banker-login).
+# Раньше эндпоинты были открыты — GET /admin/teams отдавал client_secret всех команд.
+router = APIRouter(
+    prefix="/admin",
+    tags=["Internal: Admin"],
+    include_in_schema=False,
+    dependencies=[Depends(require_banker)],
+)
 
 
 @router.get("/capital")
@@ -97,8 +105,8 @@ async def get_all_payments(
         "payments": [
             {
                 "payment_id": p.payment_id,
-                "sender_account_id": p.debtor_account or "—",
-                "receiver_account_id": p.destination_account or p.creditor_account or "—",
+                "sender_account_id": f"acc-{p.account_id}" if p.account_id else "—",
+                "receiver_account_id": p.destination_account or "—",
                 "amount": float(p.amount),
                 "currency": p.currency or "RUB",
                 "destination_account": p.destination_account,

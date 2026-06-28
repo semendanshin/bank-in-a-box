@@ -13,7 +13,7 @@ import random
 
 from database import get_db
 from models import Card, Account, Client
-from services.auth_service import require_any_token, require_client
+from services.auth_service import require_any_token, require_client, caller_owns_client
 from services.consent_service import ConsentService
 
 
@@ -141,10 +141,12 @@ async def get_cards(
         # Локальный запрос
         if token_data.get("type") == "client":
             target_client_id = token_data.get("client_id")
-        elif client_id:
+        elif client_id and caller_owns_client(token_data, client_id):
+            # team/bank-токен может работать только со СВОИМИ клиентами;
+            # для чужих нужен межбанковский путь (x-requesting-bank + consent)
             target_client_id = client_id
         else:
-            raise HTTPException(401, "Unauthorized")
+            raise HTTPException(403, "Access denied")
     
     # Найти клиента
     result = await db.execute(
@@ -239,10 +241,12 @@ async def get_card_details(
         # Локальный запрос
         if token_data.get("type") == "client":
             target_client_id = token_data.get("client_id")
-        elif client_id:
+        elif client_id and caller_owns_client(token_data, client_id):
+            # team/bank-токен может работать только со СВОИМИ клиентами;
+            # для чужих нужен межбанковский путь (x-requesting-bank + consent)
             target_client_id = client_id
         else:
-            raise HTTPException(401, "Unauthorized")
+            raise HTTPException(403, "Access denied")
     
     # Найти клиента
     result = await db.execute(
@@ -272,7 +276,7 @@ async def get_card_details(
         "data": CardResponse(
             cardId=card.card_id,
             cardNumber=mask_card_number(card.card_number),
-            cardNumberFull=card.card_number if show_full_number else None,
+            cardNumberFull=card.card_number if (show_full_number and token_data.get("type") == "client") else None,
             cardType=card.card_type,
             cardName=card.card_name,
             holderName=card.holder_name,
@@ -335,10 +339,12 @@ async def create_card(
         # Локальный запрос
         if token_data.get("type") == "client":
             target_client_id = token_data.get("client_id")
-        elif client_id:
+        elif client_id and caller_owns_client(token_data, client_id):
+            # team/bank-токен может работать только со СВОИМИ клиентами;
+            # для чужих нужен межбанковский путь (x-requesting-bank + consent)
             target_client_id = client_id
         else:
-            raise HTTPException(401, "Unauthorized")
+            raise HTTPException(403, "Access denied")
     
     # Найти клиента
     result = await db.execute(
@@ -491,10 +497,12 @@ async def update_card_status(
         # Локальный запрос
         if token_data.get("type") == "client":
             target_client_id = token_data.get("client_id")
-        elif client_id:
+        elif client_id and caller_owns_client(token_data, client_id):
+            # team/bank-токен может работать только со СВОИМИ клиентами;
+            # для чужих нужен межбанковский путь (x-requesting-bank + consent)
             target_client_id = client_id
         else:
-            raise HTTPException(401, "Unauthorized")
+            raise HTTPException(403, "Access denied")
     
     # Найти клиента
     result = await db.execute(
@@ -585,10 +593,12 @@ async def update_card_limits(
         # Локальный запрос
         if token_data.get("type") == "client":
             target_client_id = token_data.get("client_id")
-        elif client_id:
+        elif client_id and caller_owns_client(token_data, client_id):
+            # team/bank-токен может работать только со СВОИМИ клиентами;
+            # для чужих нужен межбанковский путь (x-requesting-bank + consent)
             target_client_id = client_id
         else:
-            raise HTTPException(401, "Unauthorized")
+            raise HTTPException(403, "Access denied")
     
     # Найти клиента
     result = await db.execute(
@@ -676,10 +686,12 @@ async def delete_card(
         # Локальный запрос
         if token_data.get("type") == "client":
             target_client_id = token_data.get("client_id")
-        elif client_id:
+        elif client_id and caller_owns_client(token_data, client_id):
+            # team/bank-токен может работать только со СВОИМИ клиентами;
+            # для чужих нужен межбанковский путь (x-requesting-bank + consent)
             target_client_id = client_id
         else:
-            raise HTTPException(401, "Unauthorized")
+            raise HTTPException(403, "Access denied")
     
     # Найти клиента
     result = await db.execute(

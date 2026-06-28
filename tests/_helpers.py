@@ -15,6 +15,10 @@ def team_token(team_id: str) -> str:
     return create_access_token({"sub": team_id, "client_id": team_id, "type": "team"})
 
 
+def banker_token() -> str:
+    return create_access_token({"sub": "banker", "type": "banker"})
+
+
 def auth(token: str) -> dict:
     return {"Authorization": f"Bearer {token}"}
 

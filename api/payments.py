@@ -14,7 +14,7 @@ import uuid
 
 from database import get_db
 from models import Payment, Account, PaymentConsent, Client
-from services.auth_service import require_any_token
+from services.auth_service import require_any_token, caller_owns_client
 from services.payment_service import PaymentService
 
 
@@ -256,12 +256,6 @@ async def create_payment(
     # валидного токена мог бы списать средства с произвольного счёта, просто
     # не передавая заголовок x-requesting-bank.
     if payment_consent is None:
-        caller_id = token_data.get("client_id")
-        if not caller_id:
-            raise HTTPException(
-                403,
-                "Only a client token (or a bank token bound to a client) may initiate a payment"
-            )
         owner_result = await db.execute(
             select(Account, Client)
             .join(Client, Account.client_id == Client.id)
@@ -271,10 +265,7 @@ async def create_payment(
         if not owner_row:
             raise HTTPException(404, "Debtor account not found")
         _debtor_acc, _owner = owner_row
-        owner_pid = _owner.person_id or ""
-        # client-токен: person_id совпадает точно (team200-1 == team200-1)
-        # team-токен: команда владеет всеми своими клиентами (team200 -> team200-1)
-        if not (owner_pid == caller_id or owner_pid.startswith(f"{caller_id}-")):
+        if not caller_owns_client(token_data, _owner.person_id):
             raise HTTPException(403, "Debtor account does not belong to the authenticated caller")
 
     # Явный код банка получателя (для прямого межбанковского роутинга)

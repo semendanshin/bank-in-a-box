@@ -476,7 +476,51 @@ async def close_agreement(
         if capital:
             capital.capital += debt
             capital.total_loans -= debt
-    
+
+    elif product.product_type == "deposit" and loan_account and loan_account.balance > 0:
+        # Закрытие вклада: вернуть остаток клиенту, иначе деньги пропадут.
+        deposit_balance = loan_account.balance
+        dest_account = None
+        if request and request.repayment_account_id:
+            dest_acc_id = int(request.repayment_account_id.replace("acc-", ""))
+            dest_account = (await db.execute(
+                select(Account).where(Account.id == dest_acc_id, Account.client_id == client.id)
+            )).scalar_one_or_none()
+            if not dest_account:
+                raise HTTPException(404, "Payout account not found")
+        else:
+            # По умолчанию — первый активный checking-счёт клиента (не сам депозит)
+            dest_account = (await db.execute(
+                select(Account).where(
+                    Account.client_id == client.id,
+                    Account.account_type == "checking",
+                    Account.status == "active",
+                    Account.id != loan_account.id,
+                ).limit(1)
+            )).scalars().first()
+            if not dest_account:
+                raise HTTPException(
+                    400,
+                    "No account to return deposit funds. Provide repayment_account_id.",
+                )
+
+        dest_account.balance += deposit_balance
+        loan_account.balance = Decimal("0")
+        db.add(Transaction(
+            account_id=loan_account.id,
+            transaction_id=f"tx-{uuid.uuid4().hex[:12]}",
+            amount=deposit_balance, direction="debit",
+            counterparty="Закрытие депозита",
+            description=f"Возврат вклада на счёт {dest_account.account_number}",
+        ))
+        db.add(Transaction(
+            account_id=dest_account.id,
+            transaction_id=f"tx-{uuid.uuid4().hex[:12]}",
+            amount=deposit_balance, direction="credit",
+            counterparty="Возврат вклада",
+            description=f"Возврат вклада со счёта {loan_account.account_number}",
+        ))
+
     # Закрыть договор
     agreement.status = "closed"
     

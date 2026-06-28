@@ -339,6 +339,24 @@ async def require_any_token(
         )
 
 
+def caller_owns_client(token_data: dict, person_id: str) -> bool:
+    """
+    Имеет ли вызывающий токен право действовать от имени клиента person_id.
+
+    - client-токен: его person_id (sub) совпадает с person_id клиента;
+    - team/bank-токен: команда владеет своими клиентами (team200 -> team200-1).
+
+    Для межбанковского доступа к ЧУЖИМ клиентам это вернёт False — там нужен
+    отдельный путь через согласие (x-requesting-bank + consent).
+    """
+    if not person_id:
+        return False
+    caller = token_data.get("client_id")
+    if not caller:
+        return False
+    return person_id == caller or person_id.startswith(f"{caller}-")
+
+
 def hash_password(password: str) -> str:
     """Хеширование пароля"""
     return pwd_context.hash(password)
