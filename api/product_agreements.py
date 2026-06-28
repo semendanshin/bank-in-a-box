@@ -50,7 +50,7 @@ async def get_agreements(
     """
     # Найти клиента
     result = await db.execute(
-        select(Client).where(Client.person_id == token_data["client_id"])
+        select(Client).where(Client.person_id == token_data.get("client_id"))
     )
     client = result.scalar_one_or_none()
     
@@ -114,7 +114,7 @@ async def create_agreement(
     """
     # Найти клиента
     result = await db.execute(
-        select(Client).where(Client.person_id == token_data["client_id"])
+        select(Client).where(Client.person_id == token_data.get("client_id"))
     )
     client = result.scalar_one_or_none()
     
@@ -312,7 +312,7 @@ async def get_agreement(
     """
     # Найти клиента
     result = await db.execute(
-        select(Client).where(Client.person_id == token_data["client_id"])
+        select(Client).where(Client.person_id == token_data.get("client_id"))
     )
     client = result.scalar_one_or_none()
     
@@ -387,7 +387,7 @@ async def close_agreement(
     """
     # Найти клиента
     result = await db.execute(
-        select(Client).where(Client.person_id == token_data["client_id"])
+        select(Client).where(Client.person_id == token_data.get("client_id"))
     )
     client = result.scalar_one_or_none()
     
