@@ -15,7 +15,7 @@ import uuid
 
 from database import get_db
 from models import PaymentConsentRequest, PaymentConsent, Client, Notification, BankSettings
-from services.auth_service import require_banker, require_client
+from services.auth_service import require_banker, require_client, require_any_token
 from config import config
 
 
@@ -34,9 +34,34 @@ class PaymentInitiationData(BaseModel):
 
 
 class PaymentConsentRequestModel(BaseModel):
-    """Запрос на создание согласия на платеж"""
-    data: dict = Field(..., description="Содержит initiation с данными платежа")
+    """Запрос на создание согласия на платеж.
+
+    Принимает «плоский» формат агрегатора (bank-connector) и, для обратной
+    совместимости, классический OpenBanking-формат через поле ``data.initiation``.
+    """
+    # Плоский формат (агрегатор / TPP)
+    requesting_bank: Optional[str] = None
+    client_id: Optional[str] = None
+    consent_type: Optional[str] = "single"
+    amount: Optional[Decimal] = None
+    currency: str = "RUB"
+    debtor_account: Optional[str] = None
+    creditor_account: Optional[str] = None
+    creditor_name: Optional[str] = None
+    reference: Optional[str] = None
+    max_uses: Optional[int] = None
+    max_amount_per_payment: Optional[Decimal] = None
+    max_total_amount: Optional[Decimal] = None
+    allowed_creditor_accounts: Optional[List[str]] = None
+    valid_from: Optional[str] = None
+    valid_until: Optional[str] = None
+    reason: Optional[str] = None
+    # OpenBanking-совместимый формат
+    data: Optional[dict] = None
     risk: Optional[dict] = {}
+
+    class Config:
+        extra = "ignore"
 
 
 class PaymentConsentResponseData(BaseModel):
@@ -62,7 +87,7 @@ async def create_payment_consent_request(
     request: PaymentConsentRequestModel,
     x_requesting_bank: Optional[str] = Header(None, alias="x-requesting-bank"),
     client_id: Optional[str] = None,
-    current_client: dict = Depends(require_client),
+    token_data: dict = Depends(require_any_token),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -111,43 +136,58 @@ async def create_payment_consent_request(
     - `client_id`: ID клиента в этом банке
     """
     
-    if not x_requesting_bank:
-        raise HTTPException(400, "Header x-requesting-bank required")
-    
-    if not client_id:
-        raise HTTPException(400, "Query parameter client_id required")
-    
+    # Инициатор (TPP/банк): заголовок или поле тела
+    requesting_bank = x_requesting_bank or request.requesting_bank
+    if not requesting_bank:
+        raise HTTPException(400, "Header x-requesting-bank (или поле requesting_bank) required")
+
+    # client_id: тело -> query -> client-токен
+    target_client_id = request.client_id or client_id
+    if not target_client_id and token_data.get("type") == "client":
+        target_client_id = token_data.get("client_id")
+    if not target_client_id:
+        raise HTTPException(400, "client_id required (в теле, query или client-токене)")
+
     # Найти клиента
     result = await db.execute(
-        select(Client).where(Client.person_id == client_id)
+        select(Client).where(Client.person_id == target_client_id)
     )
     client = result.scalar_one_or_none()
-    
+
     if not client:
-        raise HTTPException(404, f"Client {client_id} not found")
-    
-    # Извлечь данные платежа
-    initiation = request.data.get("initiation", {})
-    amount_data = initiation.get("instructedAmount", {})
-    debtor_account = initiation.get("debtorAccount", {})
-    creditor_account = initiation.get("creditorAccount", {})
-    remittance = initiation.get("remittanceInformation", {})
-    
-    amount = Decimal(amount_data.get("amount", "0"))
-    currency = amount_data.get("currency", "RUB")
-    debtor_account_number = debtor_account.get("identification")
-    creditor_account_number = creditor_account.get("identification")
-    creditor_name = initiation.get("creditorName", "")
-    reference = remittance.get("unstructured", "") if remittance else ""
-    
+        raise HTTPException(404, f"Client {target_client_id} not found")
+
+    # Извлечь данные платежа: плоский формат агрегатора имеет приоритет,
+    # иначе классический OpenBanking data.initiation
+    if request.amount is not None or request.debtor_account or request.creditor_account:
+        amount = Decimal(str(request.amount if request.amount is not None else "0"))
+        currency = request.currency or "RUB"
+        debtor_account_number = request.debtor_account
+        creditor_account_number = request.creditor_account
+        creditor_name = request.creditor_name or ""
+        reference = request.reference or ""
+    else:
+        initiation = (request.data or {}).get("initiation", {})
+        amount_data = initiation.get("instructedAmount", {})
+        debtor_account = initiation.get("debtorAccount", {})
+        creditor_account = initiation.get("creditorAccount", {})
+        remittance = initiation.get("remittanceInformation", {})
+
+        amount = Decimal(amount_data.get("amount", "0"))
+        currency = amount_data.get("currency", "RUB")
+        debtor_account_number = debtor_account.get("identification")
+        creditor_account_number = creditor_account.get("identification")
+        creditor_name = initiation.get("creditorName", "")
+        reference = remittance.get("unstructured", "") if remittance else ""
+
     # Создать запрос на согласие
     request_id = f"pcr-{uuid.uuid4().hex[:12]}"
-    
+
     consent_request = PaymentConsentRequest(
         request_id=request_id,
         client_id=client.id,
-        requesting_bank=x_requesting_bank,
-        requesting_bank_name=x_requesting_bank.upper(),
+        requesting_bank=requesting_bank,
+        requesting_bank_name=requesting_bank.upper(),
         amount=amount,
         currency=currency,
         debtor_account=debtor_account_number,
@@ -181,7 +221,7 @@ async def create_payment_consent_request(
             consent_id=consent_id,
             request_id=consent_request.id,
             client_id=client.id,
-            granted_to=x_requesting_bank,
+            granted_to=requesting_bank,
             amount=amount,
             currency=currency,
             debtor_account=debtor_account_number,
@@ -201,8 +241,8 @@ async def create_payment_consent_request(
         notification = Notification(
             client_id=client.id,
             notification_type="payment_consent_request",
-            title=f"Запрос на платёж от {x_requesting_bank}",
-            message=f"Приложение {x_requesting_bank} запрашивает согласие на платёж: {amount} {currency} → {creditor_name}",
+            title=f"Запрос на платёж от {requesting_bank}",
+            message=f"Приложение {requesting_bank} запрашивает согласие на платёж: {amount} {currency} → {creditor_name}",
             related_id=request_id,
             status="unread"
         )

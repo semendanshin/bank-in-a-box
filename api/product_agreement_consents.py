@@ -150,10 +150,10 @@ async def create_product_agreement_consent_request(
     
     # Определить client_id (либо из токена, либо из параметра для bank_token)
     target_client_id = None
-    if current_client:
-        target_client_id = current_client.get("client_id")
+    if token_data and token_data.get("type") == "client":
+        target_client_id = token_data.get("client_id")
     elif client_id:
-        # Используется bank_token с параметром client_id - это OK
+        # bank/team-токен с параметром client_id - это OK
         target_client_id = client_id
     else:
         raise HTTPException(401, "Unauthorized. Укажите client_id или используйте client_token")
