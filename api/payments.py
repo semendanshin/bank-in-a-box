@@ -203,9 +203,11 @@ async def create_payment(
     if not initiation:
         raise HTTPException(400, "Missing initiation data")
     
-    amount_data = initiation.get("instructedAmount", {})
-    debtor_account = initiation.get("debtorAccount", {})
-    creditor_account = initiation.get("creditorAccount", {})
+    # Accept both OpenBanking camelCase (instructedAmount) and the aggregator's
+    # snake_case (instructed_amount) / snake account keys.
+    amount_data = initiation.get("instructedAmount") or initiation.get("instructed_amount") or {}
+    debtor_account = initiation.get("debtorAccount") or initiation.get("debtor_account") or {}
+    creditor_account = initiation.get("creditorAccount") or initiation.get("creditor_account") or {}
     
     # Описание платежа (поддержка обоих форматов)
     # 1. Простой формат: прямо в initiation.comment

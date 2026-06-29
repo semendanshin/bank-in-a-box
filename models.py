@@ -159,7 +159,7 @@ class Transaction(Base):
     status = Column(String(30), default="completed")  # pending, completed, declined, refunded
     
     # Банковский код транзакции
-    bank_transaction_code = Column(String(10))  # "01" - оплата товаров, "02" - перевод, etc
+    bank_transaction_code = Column(String(50))  # e.g. "PointOfSale", "ReceivedCreditTransfer"
     
     # Даты
     transaction_date = Column(DateTime, default=datetime.utcnow)

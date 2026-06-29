@@ -50,6 +50,7 @@ class BankConfig(BaseSettings):
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
+        extra = "ignore"  # tolerate federation/seed env vars (TEAM_*, SEED_*) read elsewhere
 
     # === Хелперы межбанковского роутинга ===
 

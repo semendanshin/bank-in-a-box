@@ -25,10 +25,10 @@ from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 try:
-    from .models import Client, Account, BankCapital, BankSettings, Team, Merchant, Card, Transaction
+    from .models import Client, Account, BankCapital, BankSettings, Team, Merchant, Card, Transaction, Product
     from .config import config
 except ImportError:
-    from models import Client, Account, BankCapital, BankSettings, Team, Merchant, Card, Transaction
+    from models import Client, Account, BankCapital, BankSettings, Team, Merchant, Card, Transaction, Product
     from config import config
 
 
@@ -214,6 +214,30 @@ async def seed_if_empty(session: AsyncSession) -> bool:
 
         if SEED_TX:
             await _seed_history(session, account, client, merchants)
+
+    # Каталог продуктов банка (маркетплейс): депозит, кредит, кредитная карта
+    products_by_bank = {
+        "vbank": [
+            ("vbank-dep-1", "deposit", "Вклад «Виртуальный»", "Накопительный вклад с ежемесячной капитализацией", Decimal("16.00"), Decimal("10000"), Decimal("5000000"), 12),
+            ("vbank-loan-1", "loan", "Кредит наличными", "Потребительский кредит без залога", Decimal("23.90"), Decimal("30000"), Decimal("3000000"), 36),
+            ("vbank-cc-1", "credit_card", "Кредитная карта Virtual", "Кредитка с льготным периодом 120 дней", Decimal("29.90"), None, Decimal("500000"), None),
+        ],
+        "abank": [
+            ("abank-dep-1", "deposit", "Вклад «Awesome Max»", "Вклад с максимальной ставкой", Decimal("17.50"), Decimal("50000"), Decimal("10000000"), 6),
+            ("abank-loan-1", "loan", "Автокредит Awesome", "Кредит на новый автомобиль", Decimal("18.50"), Decimal("100000"), Decimal("7000000"), 60),
+            ("abank-cc-1", "credit_card", "Awesome Cashback", "Карта с кэшбэком до 10%", Decimal("27.50"), None, Decimal("700000"), None),
+        ],
+        "sbank": [
+            ("sbank-dep-1", "deposit", "Вклад «Smart Save»", "Долгосрочный вклад", Decimal("18.00"), Decimal("10000"), Decimal("8000000"), 24),
+            ("sbank-loan-1", "loan", "Ипотека Smart", "Ипотечный кредит на жильё", Decimal("13.90"), Decimal("500000"), Decimal("30000000"), 240),
+            ("sbank-cc-1", "credit_card", "Smart Credit Card", "Премиальная кредитная карта", Decimal("25.90"), None, Decimal("1000000"), None),
+        ],
+    }
+    for pid, ptype, pname, pdesc, rate, lo, hi, term in products_by_bank.get(bank_code, []):
+        session.add(Product(
+            product_id=pid, product_type=ptype, name=pname, description=pdesc,
+            interest_rate=rate, min_amount=lo, max_amount=hi, term_months=term, is_active=True,
+        ))
 
     await session.commit()
     return True

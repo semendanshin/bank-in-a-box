@@ -150,10 +150,10 @@ async def create_product_agreement_consent_request(
     
     # Определить client_id (либо из токена, либо из параметра для bank_token)
     target_client_id = None
-    if current_client:
-        target_client_id = current_client.get("client_id")
+    if token_data and token_data.get("type") == "client":
+        target_client_id = token_data.get("client_id")
     elif client_id:
-        # Используется bank_token с параметром client_id - это OK
+        # bank/team-токен с параметром client_id - это OK
         target_client_id = client_id
     else:
         raise HTTPException(401, "Unauthorized. Укажите client_id или используйте client_token")
@@ -258,7 +258,7 @@ async def create_product_agreement_consent_request(
 @router.get("/{consent_id}", response_model=dict, summary="Получить согласие по ID")
 async def get_product_agreement_consent(
     consent_id: str,
-    current_client: dict = Depends(require_client),
+    current_client: dict = Depends(require_any_token),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -292,7 +292,7 @@ async def get_product_agreement_consent(
 @router.delete("/{consent_id}", status_code=204, summary="Отозвать согласие")
 async def revoke_product_agreement_consent(
     consent_id: str,
-    current_client: dict = Depends(require_client),
+    current_client: dict = Depends(require_any_token),
     db: AsyncSession = Depends(get_db)
 ):
     """

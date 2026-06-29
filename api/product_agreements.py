@@ -1,7 +1,7 @@
 """
 ProductAgreements API - Договоры клиентов с продуктами (депозиты, кредиты, карты)
 """
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from pydantic import BaseModel
@@ -39,9 +39,20 @@ class ProductAgreementResponse(BaseModel):
     account_number: Optional[str]
 
 
+async def _resolve_person_id(request: Request, token_data: dict = Depends(require_any_token)) -> str:
+    """Effective client person_id: a client token's own id, else the ?client_id=
+    query param (used by aggregator / TPP team/bank tokens)."""
+    if token_data.get("type") == "client" and token_data.get("client_id"):
+        return token_data["client_id"]
+    cid = request.query_params.get("client_id")
+    if not cid:
+        raise HTTPException(400, "client_id required (query param or client token)")
+    return cid
+
+
 @router.get("", summary="Получить договоры")
 async def get_agreements(
-    token_data: dict = Depends(require_any_token),
+    person_id: str = Depends(_resolve_person_id),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -51,7 +62,7 @@ async def get_agreements(
     """
     # Найти клиента
     result = await db.execute(
-        select(Client).where(Client.person_id == token_data.get("client_id"))
+        select(Client).where(Client.person_id == person_id)
     )
     client = result.scalar_one_or_none()
     
@@ -103,7 +114,7 @@ async def get_agreements(
 @router.post("", summary="Создать договор")
 async def create_agreement(
     request: ProductAgreementRequest,
-    token_data: dict = Depends(require_any_token),
+    person_id: str = Depends(_resolve_person_id),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -115,7 +126,7 @@ async def create_agreement(
     """
     # Найти клиента
     result = await db.execute(
-        select(Client).where(Client.person_id == token_data.get("client_id"))
+        select(Client).where(Client.person_id == person_id)
     )
     client = result.scalar_one_or_none()
     
@@ -165,11 +176,19 @@ async def create_agreement(
         
         # Списать средства со source account
         if True:  # Always true now
-            source_acc_id = parse_account_id(request.source_account_id)
-            source_acc_result = await db.execute(
-                select(Account).where(Account.id == source_acc_id, Account.client_id == client.id)
-            )
-            source_account = source_acc_result.scalar_one_or_none()
+            # Aggregator sends the 20-digit account NUMBER; bank UI may send the
+            # internal id ("acc-123"). Resolve by number first, then by id.
+            source_account = (await db.execute(
+                select(Account).where(
+                    Account.account_number == str(request.source_account_id),
+                    Account.client_id == client.id,
+                )
+            )).scalar_one_or_none()
+            if source_account is None:
+                source_acc_id = parse_account_id(request.source_account_id)
+                source_account = (await db.execute(
+                    select(Account).where(Account.id == source_acc_id, Account.client_id == client.id)
+                )).scalar_one_or_none()
             
             if not source_account:
                 raise HTTPException(404, "Source account not found")
@@ -305,7 +324,7 @@ async def create_agreement(
 @router.get("/{agreement_id}", summary="Получить договор")
 async def get_agreement(
     agreement_id: str,
-    token_data: dict = Depends(require_any_token),
+    person_id: str = Depends(_resolve_person_id),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -313,7 +332,7 @@ async def get_agreement(
     """
     # Найти клиента
     result = await db.execute(
-        select(Client).where(Client.person_id == token_data.get("client_id"))
+        select(Client).where(Client.person_id == person_id)
     )
     client = result.scalar_one_or_none()
     
@@ -376,7 +395,7 @@ class CloseAgreementRequest(BaseModel):
 async def close_agreement(
     agreement_id: str,
     request: Optional[CloseAgreementRequest] = None,
-    token_data: dict = Depends(require_any_token),
+    person_id: str = Depends(_resolve_person_id),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -388,7 +407,7 @@ async def close_agreement(
     """
     # Найти клиента
     result = await db.execute(
-        select(Client).where(Client.person_id == token_data.get("client_id"))
+        select(Client).where(Client.person_id == person_id)
     )
     client = result.scalar_one_or_none()
     
