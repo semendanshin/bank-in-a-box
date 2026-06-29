@@ -176,11 +176,19 @@ async def create_agreement(
         
         # Списать средства со source account
         if True:  # Always true now
-            source_acc_id = parse_account_id(request.source_account_id)
-            source_acc_result = await db.execute(
-                select(Account).where(Account.id == source_acc_id, Account.client_id == client.id)
-            )
-            source_account = source_acc_result.scalar_one_or_none()
+            # Aggregator sends the 20-digit account NUMBER; bank UI may send the
+            # internal id ("acc-123"). Resolve by number first, then by id.
+            source_account = (await db.execute(
+                select(Account).where(
+                    Account.account_number == str(request.source_account_id),
+                    Account.client_id == client.id,
+                )
+            )).scalar_one_or_none()
+            if source_account is None:
+                source_acc_id = parse_account_id(request.source_account_id)
+                source_account = (await db.execute(
+                    select(Account).where(Account.id == source_acc_id, Account.client_id == client.id)
+                )).scalar_one_or_none()
             
             if not source_account:
                 raise HTTPException(404, "Source account not found")
