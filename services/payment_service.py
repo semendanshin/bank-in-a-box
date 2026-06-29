@@ -95,7 +95,10 @@ class PaymentService:
         interbank_transfer = None
         
         db.add(payment)
-        
+        # Flush so the payments row exists before rows that FK-reference it
+        # (interbank_transfers.payment_id -> payments.payment_id).
+        await db.flush()
+
         if to_account:
             # Внутрибанковский перевод
             to_account.balance += amount
